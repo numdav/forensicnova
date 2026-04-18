@@ -1,0 +1,63 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# ===== Virtual environments =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Forensic artifacts (NEVER commit these) =====
+# Memory dumps (can contain credentials, keys, PII)
+*.raw
+*.dmp
+*.mem
+*.lime
+*.core
+# Generated reports may contain sensitive case data
+*.pdf
+*.json.report
+reports/output/
+dumps/
+
+# ===== Secrets and credentials =====
+.env
+.env.*
+*.pem
+*.key
+*.crt
+openrc
+openrc-*
+credentials.json
+
+# ===== Logs =====
+*.log
+logs/
+
+# ===== IDE / editor =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== OpenStack / DevStack local =====
+local.conf
+stack.sh.log*

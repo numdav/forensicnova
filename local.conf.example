@@ -1,0 +1,35 @@
+# Sample DevStack local.conf for ForensicNova deployment
+# Copy to /opt/stack/devstack/local.conf and adapt to your environment.
+
+[[local|localrc]]
+# ===== Credentials =====
+ADMIN_PASSWORD=secret
+DATABASE_PASSWORD=$ADMIN_PASSWORD
+RABBIT_PASSWORD=$ADMIN_PASSWORD
+SERVICE_PASSWORD=$ADMIN_PASSWORD
+
+# ===== Networking (replace with your VM IP) =====
+HOST_IP=192.168.x.x
+SERVICE_HOST=$HOST_IP
+MYSQL_HOST=$SERVICE_HOST
+RABBIT_HOST=$SERVICE_HOST
+GLANCE_HOSTPORT=$SERVICE_HOST:9292
+
+# ===== Cinder off, Swift on (forensic artifacts live in object storage) =====
+disable_service cinder c-api c-sch c-vol
+enable_service s-proxy s-object s-container s-account
+SWIFT_HASH=change_me_to_a_random_string
+SWIFT_REPLICAS=1
+SWIFT_DATA_DIR=/opt/stack/data/swift
+
+# ===== KVM with nested virtualization =====
+LIBVIRT_TYPE=kvm
+
+# ===== Logging =====
+LOGFILE=/opt/stack/logs/stack.sh.log
+LOGDAYS=2
+VERBOSE=True
+LOG_COLOR=True
+
+# ===== ForensicNova plugin =====
+enable_plugin forensicnova https://github.com/numdav/forensicnova main
