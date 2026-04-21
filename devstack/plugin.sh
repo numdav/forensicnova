@@ -149,10 +149,9 @@ forensicnova_install_python_deps() {
     forensicnova_log "install" \
         "creating venv and installing Python deps in $FORENSICNOVA_DIR/.venv"
     python3 -m venv "$FORENSICNOVA_DIR/.venv"
-    # shellcheck disable=SC1091
-    source "$FORENSICNOVA_DIR/.venv/bin/activate"
-    pip install --quiet --disable-pip-version-check --upgrade pip setuptools wheel
-    pip install --quiet --disable-pip-version-check \
+    local venv_pip="$FORENSICNOVA_DIR/.venv/bin/pip"
+    "$venv_pip" install --quiet --disable-pip-version-check --upgrade pip setuptools wheel
+    "$venv_pip" install --quiet --disable-pip-version-check \
         Flask \
         reportlab \
         python-swiftclient \
@@ -160,7 +159,6 @@ forensicnova_install_python_deps() {
         python-novaclient \
         keystonemiddleware \
         requests
-    deactivate
 }
 
 # =============================================================================
