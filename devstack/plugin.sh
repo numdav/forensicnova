@@ -188,9 +188,12 @@ install_forensicnova() {
 
 configure_forensicnova() {
     forensicnova_marker "post-config"
+# Controllo di sicurezza credenziali
+    if [[ -z "$FORENSICNOVA_DFIR_PASSWORD" ]]; then
+        forensicnova_log "post-config" "ERROR: FORENSICNOVA_DFIR_PASSWORD is unset. Set it in local.conf."
+        return 1
+    fi
     forensicnova_ensure_dirs
-    forensicnova_ensure_identity
-    forensicnova_ensure_container
     forensicnova_write_config
     forensicnova_write_openrc
     forensicnova_log "post-config" "configuration completed successfully"
@@ -198,6 +201,8 @@ configure_forensicnova() {
 
 init_forensicnova() {
     forensicnova_marker "extra"
+    forensicnova_ensure_identity
+    forensicnova_ensure_container
     forensicnova_log "extra" "TODO FASE 3: register Flask service (devstack@forensicnova)"
 }
 

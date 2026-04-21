@@ -33,3 +33,6 @@ LOG_COLOR=True
 
 # ===== ForensicNova plugin =====
 enable_plugin forensicnova https://github.com/numdav/forensicnova main
+
+# Credenziali dell'utente DFIR (OBBLIGATORIO)
+FORENSICNOVA_DFIR_PASSWORD=REPLACE_ME_WITH_A_STRONG_PASSWORD
