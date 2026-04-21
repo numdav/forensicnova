@@ -1,40 +1,30 @@
-# ==============================================================================
-# ForensicNova — DevStack plugin settings
-# ==============================================================================
-# This file is sourced by DevStack early in the stacking lifecycle, BEFORE any
-# service is installed. It must contain only variable declarations (with sane
-# defaults) — no runtime logic.
-#
-# Variables declared here become visible to the rest of DevStack and to our
-# own plugin.sh.
-# ==============================================================================
+# ForensicNova DevStack plugin — settings
+# Variables are overridable from local.conf.
+# Pattern: ${VAR:-default} means "keep VAR if already set, otherwise use default".
 
-# ---- Register as a DevStack service ------------------------------------------
-# Telling DevStack that "forensicnova" is a named service allows unstack/clean
-# hooks to be dispatched correctly and makes the service show up in enabled
-# service lists.
-enable_service forensicnova
-
-# ---- Repository coordinates (where DevStack cloned us) -----------------------
-# $DEST is defined by DevStack and points to /opt/stack by default.
-# When enable_plugin clones us, it lands in $DEST/forensicnova.
+# --- Plugin layout ---
 FORENSICNOVA_DIR=${FORENSICNOVA_DIR:-$DEST/forensicnova}
-
-# ---- Plugin network settings -------------------------------------------------
-# The Flask API + dashboard listens on this port on the host.
 FORENSICNOVA_PORT=${FORENSICNOVA_PORT:-5234}
 FORENSICNOVA_BIND_HOST=${FORENSICNOVA_BIND_HOST:-0.0.0.0}
 
-# ---- Keystone role dedicated to forensic operators ---------------------------
-# Only users granted this role will be allowed to invoke memory_acquire.
+# --- Keystone identity artifacts ---
 FORENSICNOVA_ROLE=${FORENSICNOVA_ROLE:-forensic_analyst}
+FORENSICNOVA_PROJECT=${FORENSICNOVA_PROJECT:-forensics}
+FORENSICNOVA_PROJECT_DESCRIPTION=${FORENSICNOVA_PROJECT_DESCRIPTION:-ForensicNova DFIR artifacts and memory acquisition}
+FORENSICNOVA_DFIR_USER=${FORENSICNOVA_DFIR_USER:-dfir-tester}
+FORENSICNOVA_DFIR_PASSWORD=${FORENSICNOVA_DFIR_PASSWORD:-DFIR-Lab-2026}
 
-# ---- Swift container for forensic artifacts ----------------------------------
-# Memory dumps, JSON chain-of-custody records, PDF reports will live here.
+# --- Swift storage ---
 FORENSICNOVA_SWIFT_CONTAINER=${FORENSICNOVA_SWIFT_CONTAINER:-forensics}
 
-# ---- Runtime directories -----------------------------------------------------
-# Where virsh dump writes its temporary output before upload+delete.
-# Kept on the compute host, never on the target VM.
+# --- Runtime filesystem layout (on the host) ---
 FORENSICNOVA_WORK_DIR=${FORENSICNOVA_WORK_DIR:-/var/lib/forensicnova}
 FORENSICNOVA_LOG_DIR=${FORENSICNOVA_LOG_DIR:-/var/log/forensicnova}
+FORENSICNOVA_CONF_DIR=${FORENSICNOVA_CONF_DIR:-/etc/forensicnova}
+FORENSICNOVA_CONF_FILE=${FORENSICNOVA_CONF_FILE:-$FORENSICNOVA_CONF_DIR/forensicnova.conf}
+
+# --- Generated openrc for testing as dfir-tester ---
+FORENSICNOVA_OPENRC=${FORENSICNOVA_OPENRC:-$DEST/devstack/openrc-dfir}
+
+# --- DevStack service registration ---
+enable_service forensicnova
