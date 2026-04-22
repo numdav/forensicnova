@@ -89,16 +89,20 @@ def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
     HTTP_X_* environ keys.  Per-blueprint before_request hooks enforce
     the actual access policy.
 
-    If [keystone_authtoken] is not configured (e.g. local dev without
-    plugin.sh having run), we skip wiring and log a clear warning.  In
-    that case /api/v1/* will return 401 because HTTP_X_IDENTITY_STATUS
-    will never be 'Confirmed' — which is the safe default.
+    If [keystone_authtoken] is not fully configured, we skip wiring and
+    log a clear warning.  In that case /api/v1/* will return 401 because
+    HTTP_X_IDENTITY_STATUS will never be 'Confirmed' — safe default.
     """
-    missing = [
-        k for k in ("auth_url", "username", "password", "project_name")
-        if not getattr(cfg, f"keystone_authtoken_{k}", None)
-        and not (k == "auth_url" and cfg.keystone_auth_url)
-    ]
+    missing = []
+    if not cfg.keystone_auth_url:
+        missing.append("keystone.auth_url")
+    if not cfg.keystone_authtoken_username:
+        missing.append("keystone_authtoken.username")
+    if not cfg.keystone_authtoken_password:
+        missing.append("keystone_authtoken.password")
+    if not cfg.keystone_authtoken_project:
+        missing.append("keystone_authtoken.project_name")
+
     if missing:
         app.logger.warning(
             "keystonemiddleware NOT wired — missing config: %s. "
