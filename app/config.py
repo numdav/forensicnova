@@ -4,17 +4,18 @@ Reads the INI file written by devstack/plugin.sh at stack time
 (default path: /etc/forensicnova/forensicnova.conf) and exposes
 a Config dataclass consumed by the Flask application factory.
 
-Why stdlib configparser:
-- Zero external dependencies.
-- INI is the native OpenStack config format (nova.conf, keystone.conf, ...),
-  keeping ForensicNova aligned with the ecosystem.
-- Easy to upgrade to oslo.config in the future without changing the file
-  format on disk (the plugin keeps writing INI).
+INI sections handled:
+    [DEFAULT]            runtime / bind
+    [keystone]           identity discovery (auth_url, region, role)
+    [keystone_authtoken] service credentials for keystonemiddleware (FASE 4)
+    [swift]              object storage container name
+    [forensics]          DFIR project context
+    [libvirt]            hypervisor connection URI
 
-The Config dataclass intentionally holds plain Python defaults: if a
-section or key is missing, the app still starts. This helps during
-development and allows running `python -m app.wsgi` on a dev box without
-the plugin having written the file yet.
+Sensitive values:
+  - keystone_authtoken_password: read from the INI file (mode 640 stack:stack)
+    OR overridden by the FORENSICNOVA_KEYSTONE_AUTHTOKEN_PASSWORD env var if
+    set.  This lets the systemd unit pass it without persisting on disk.
 """
 from __future__ import annotations
 
@@ -28,13 +29,7 @@ DEFAULT_CONFIG_PATH = "/etc/forensicnova/forensicnova.conf"
 
 @dataclass
 class Config:
-    """Typed view of forensicnova.conf.
-
-    Field groups mirror the INI sections written by plugin.sh.
-    Extend this dataclass (and load_config below) when FASE 4+
-    introduces new configuration sections (e.g. [volatility],
-    [yara], [misp] for the thesis work).
-    """
+    """Typed view of forensicnova.conf."""
 
     # [DEFAULT] — runtime / bind
     bind_host: str = "0.0.0.0"
@@ -42,22 +37,32 @@ class Config:
     work_dir: str = "/var/lib/forensicnova"
     log_dir: str = "/var/log/forensicnova"
 
-    # [keystone] — identity integration (used in FASE 4 by keystonemiddleware)
+    # [keystone] — identity discovery
     keystone_auth_url: str = ""
     keystone_region: str = "RegionOne"
     keystone_forensic_role: str = "forensic_analyst"
 
-    # [swift] — object storage for dumps + chain-of-custody artifacts
+    # [keystone_authtoken] — service credentials for keystonemiddleware
+    # The middleware uses these to authenticate against Keystone in order
+    # to validate the user-supplied X-Auth-Token on each request.
+    # By convention we use the admin user (sufficient privilege to validate
+    # arbitrary tokens; for production a dedicated 'service' user with the
+    # 'service' role on the 'service' project would be preferable).
+    keystone_authtoken_username: str = "admin"
+    keystone_authtoken_password: str = ""
+    keystone_authtoken_project:  str = "admin"
+
+    # [swift] — object storage container
     swift_container: str = "forensics"
 
     # [forensics] — DFIR project context
     forensics_project: str = "forensics"
     forensics_dfir_user: str = "dfir-tester"
 
-    # [libvirt] — hypervisor connection for virsh dump (FASE 4)
+    # [libvirt] — hypervisor connection
     libvirt_uri: str = "qemu:///system"
 
-    # Where this config was actually loaded from (useful for diagnostics)
+    # Bookkeeping
     config_path: str = DEFAULT_CONFIG_PATH
 
 
@@ -65,33 +70,27 @@ def load_config(path: Optional[str] = None) -> Config:
     """Load ForensicNova config from an INI file.
 
     Resolution order for the file path:
-      1. Explicit `path` argument (used in tests).
+      1. Explicit ``path`` argument (used in tests).
       2. FORENSICNOVA_CONFIG environment variable.
       3. DEFAULT_CONFIG_PATH (production / DevStack).
 
-    Missing file or missing keys fall back to dataclass defaults — the
-    app will log a warning but still start. This is a deliberate
-    dev-friendliness choice; in FASE 4 we may switch to strict loading
-    for the forensics sections that have no sensible default.
+    The keystone_authtoken_password is additionally overridable via the
+    FORENSICNOVA_KEYSTONE_AUTHTOKEN_PASSWORD environment variable, which
+    the systemd unit injects at process start.
     """
     cfg_path = path or os.environ.get("FORENSICNOVA_CONFIG", DEFAULT_CONFIG_PATH)
 
     cp = configparser.ConfigParser()
-    # Preserve key case (configparser lowercases by default).
-    cp.optionxform = str
+    cp.optionxform = str  # preserve key case
     read_files = cp.read(cfg_path)
 
     cfg = Config(config_path=cfg_path)
 
-    # Note on [DEFAULT]: configparser treats DEFAULT values as inherited
-    # by every other section. We only use it here for truly global
-    # runtime knobs (bind_host, bind_port, log_dir, work_dir) — this is
-    # exactly how the plugin writes the file, so semantics match.
     if read_files:
         cfg.bind_host = cp.get("DEFAULT", "bind_host", fallback=cfg.bind_host)
         cfg.bind_port = cp.getint("DEFAULT", "bind_port", fallback=cfg.bind_port)
-        cfg.work_dir = cp.get("DEFAULT", "work_dir", fallback=cfg.work_dir)
-        cfg.log_dir = cp.get("DEFAULT", "log_dir", fallback=cfg.log_dir)
+        cfg.work_dir  = cp.get("DEFAULT", "work_dir",  fallback=cfg.work_dir)
+        cfg.log_dir   = cp.get("DEFAULT", "log_dir",   fallback=cfg.log_dir)
 
     if cp.has_section("keystone"):
         cfg.keystone_auth_url = cp.get(
@@ -103,6 +102,25 @@ def load_config(path: Optional[str] = None) -> Config:
         cfg.keystone_forensic_role = cp.get(
             "keystone", "forensic_role", fallback=cfg.keystone_forensic_role
         )
+
+    if cp.has_section("keystone_authtoken"):
+        cfg.keystone_authtoken_username = cp.get(
+            "keystone_authtoken", "username",
+            fallback=cfg.keystone_authtoken_username,
+        )
+        cfg.keystone_authtoken_password = cp.get(
+            "keystone_authtoken", "password",
+            fallback=cfg.keystone_authtoken_password,
+        )
+        cfg.keystone_authtoken_project = cp.get(
+            "keystone_authtoken", "project_name",
+            fallback=cfg.keystone_authtoken_project,
+        )
+
+    # Env var overrides for sensitive values (preferred path in production).
+    env_pwd = os.environ.get("FORENSICNOVA_KEYSTONE_AUTHTOKEN_PASSWORD", "")
+    if env_pwd:
+        cfg.keystone_authtoken_password = env_pwd
 
     if cp.has_section("swift"):
         cfg.swift_container = cp.get(

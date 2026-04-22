@@ -1,25 +1,23 @@
 """ForensicNova API blueprints.
 
-Two blueprint families live here (only the first is active in FASE 3):
+Two blueprint families live here:
 
 * core_bp — infrastructure endpoints served at root (/health, /version).
             Unauthenticated by design: liveness probes must never require
             Keystone tokens (standard practice, same as OpenStack services
             that expose /healthcheck).
 
-* api_v1_bp — the DFIR REST API, mounted at /api/v1/*.
-              Will be introduced in FASE 4 and wrapped by keystonemiddleware
-              with role enforcement (forensic_analyst).
-              Planned endpoints:
+* api_v1_bp — the DFIR REST API, mounted at /api/v1/* by app/__init__.py.
+              Protected by keystonemiddleware (auth_token) wired around the
+              Flask WSGI app, plus a per-blueprint before_request hook in
+              app/api/v1.py that enforces the forensic_analyst role.
+              Endpoints (FASE 4):
                 POST /api/v1/servers/<instance_id>/memory_acquire
+              Endpoints planned for FASE 5+:
                 GET  /api/v1/acquisitions/
                 GET  /api/v1/acquisitions/<acq_id>
                 GET  /api/v1/acquisitions/<acq_id>/report.pdf
                 GET  /api/v1/acquisitions/<acq_id>/report.json
-
-For the thesis, additional families will be added following the same
-pattern (e.g. /api/v1/acquisitions/<acq_id>/ioc for Volatility results,
-/api/v1/acquisitions/<acq_id>/yara for YARA matches).
 """
 from __future__ import annotations
 
@@ -34,14 +32,10 @@ core_bp = Blueprint("core", __name__)
 
 @core_bp.route("/health", methods=["GET"])
 def health():
-    """Liveness probe.
-
-    Returns a small, constant JSON payload identifying the service and
-    its version. Intentionally unauthenticated — used by systemd, local
-    monitoring, and by the examiner during the oral demo.
+    """Liveness probe.  Unauthenticated by design.
 
     The 'version' field comes from app.__version__ via app.config and
-    will be embedded in every forensic report for reproducibility.
+    is embedded in every forensic report for reproducibility.
     """
     version = current_app.config.get("VERSION", "unknown")
     log.debug("health check served (version=%s)", version)
@@ -50,3 +44,8 @@ def health():
         service="forensicnova",
         version=version,
     )
+
+
+# Re-export the v1 API blueprint so app/__init__.py can import both from
+# a single location:  from app.api import core_bp, api_v1_bp
+from app.api.v1 import api_v1_bp  # noqa: E402

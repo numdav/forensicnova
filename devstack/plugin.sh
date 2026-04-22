@@ -129,6 +129,15 @@ container = ${FORENSICNOVA_SWIFT_CONTAINER}
 project = ${FORENSICNOVA_PROJECT}
 dfir_user = ${FORENSICNOVA_DFIR_USER}
 
+[keystone_authtoken]
+auth_url = http://${HOST_IP}/identity
+auth_type = password
+project_domain_id = default
+user_domain_id = default
+project_name = admin
+username = admin
+password = ${ADMIN_PASSWORD}
+
 [libvirt]
 uri = qemu:///system
 EOF
