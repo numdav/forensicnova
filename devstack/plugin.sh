@@ -203,6 +203,7 @@ WorkingDirectory=${FORENSICNOVA_DIR}
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=${FORENSICNOVA_DIR}
 Environment=FORENSICNOVA_CONFIG=${FORENSICNOVA_CONF_FILE}
+Environment=FORENSICNOVA_DFIR_PASSWORD=${FORENSICNOVA_DFIR_PASSWORD}
 ExecStart=${venv_python} -m app.wsgi
 Restart=on-failure
 RestartSec=5
