@@ -261,9 +261,9 @@ preinstall_forensicnova() {
         forensicnova_log "pre-install" "virsh available: $(command -v virsh)"
     fi
     # python3-venv is required for the dedicated virtualenv created in 'install'
-    if ! dpkg -s python3-venv >/dev/null 2>&1; then
-        forensicnova_log "pre-install" "installing python3-venv"
-        sudo apt-get install -y python3-venv
+    if ! dpkg -s python3-venv libvirt-dev pkg-config >/dev/null 2>&1; then
+        forensicnova_log "pre-install" "installing system dependencies (python3-venv, libvirt-dev, pkg-config)"
+        sudo apt-get install -y python3-venv libvirt-dev pkg-config
     fi
 }
 
