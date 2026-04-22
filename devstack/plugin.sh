@@ -173,7 +173,8 @@ forensicnova_install_python_deps() {
         python-keystoneclient \
         python-novaclient \
         keystonemiddleware \
-        requests
+        requests \
+        libvirt-python
 }
 
 # -----------------------------------------------------------------------------
