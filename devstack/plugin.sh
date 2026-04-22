@@ -5,10 +5,10 @@
 # Lifecycle phases wired in this file:
 #   stack pre-install   -> preinstall_forensicnova  (system packages)
 #   stack install       -> install_forensicnova     (python venv + pip deps)
-#   stack post-config   -> configure_forensicnova   (keystone, swift, fs, conf)
-#   stack extra         -> init_forensicnova        (FASE 3: Flask service)
-#   unstack             -> stop_forensicnova
-#   clean               -> cleanup_forensicnova
+#   stack post-config   -> configure_forensicnova   (dirs, conf file, openrc)
+#   stack extra         -> init_forensicnova        (keystone, swift, systemd)
+#   unstack             -> stop_forensicnova        (stop systemd unit)
+#   clean               -> cleanup_forensicnova     (remove unit + data)
 #
 # Docs: https://docs.openstack.org/devstack/latest/plugins.html
 
@@ -16,6 +16,18 @@
 FORENSICNOVA_PLUGIN_DIR=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")")
 # shellcheck disable=SC1091
 source "${FORENSICNOVA_PLUGIN_DIR}/settings"
+
+# =============================================================================
+# Constants local to FASE 3+ systemd management
+# =============================================================================
+#
+# The unit is named devstack@forensicnova.service for visual consistency
+# with the rest of DevStack (n-api, n-cpu, g-api, q-svc, s-proxy, ...).
+# It is a CONCRETE unit file, not an instance of the DevStack template —
+# systemd resolves concrete files before templates, so this is safe and
+# keeps our plugin independent from DevStack's internal unit template.
+FORENSICNOVA_SYSTEMD_UNIT="devstack@forensicnova.service"
+FORENSICNOVA_SYSTEMD_PATH="/etc/systemd/system/${FORENSICNOVA_SYSTEMD_UNIT}"
 
 # =============================================================================
 # Logging helpers
@@ -51,7 +63,7 @@ forensicnova_ensure_dirs() {
 # Keystone identity artifacts: role + project + user + role assignments.
 # Uses DevStack's native idempotent helpers (from lib/keystone).
 forensicnova_ensure_identity() {
-    forensicnova_log "post-config" "ensuring Keystone identity artifacts"
+    forensicnova_log "extra" "ensuring Keystone identity artifacts"
 
     # Custom role for forensic analysts
     get_or_create_role "$FORENSICNOVA_ROLE"
@@ -75,7 +87,7 @@ forensicnova_ensure_identity() {
 # We scope the call via a subshell with overridden OS_* variables so we don't
 # pollute the admin environment that DevStack relies on for the rest of setup.
 forensicnova_ensure_container() {
-    forensicnova_log "post-config" \
+    forensicnova_log "extra" \
         "ensuring Swift container '$FORENSICNOVA_SWIFT_CONTAINER' in project '$FORENSICNOVA_PROJECT'"
     (
         export OS_USERNAME="$FORENSICNOVA_DFIR_USER"
@@ -149,6 +161,9 @@ forensicnova_install_python_deps() {
     forensicnova_log "install" \
         "creating venv and installing Python deps in $FORENSICNOVA_DIR/.venv"
     python3 -m venv "$FORENSICNOVA_DIR/.venv"
+    # IMPORTANT: never 'source activate' this venv from within plugin.sh —
+    # it contaminates PATH and breaks Neutron later. Always call the venv's
+    # pip/python by absolute path. See SITREP Fix #1.
     local venv_pip="$FORENSICNOVA_DIR/.venv/bin/pip"
     "$venv_pip" install --quiet --disable-pip-version-check --upgrade pip setuptools wheel
     "$venv_pip" install --quiet --disable-pip-version-check \
@@ -159,6 +174,76 @@ forensicnova_install_python_deps() {
         python-novaclient \
         keystonemiddleware \
         requests
+}
+
+# -----------------------------------------------------------------------------
+# FASE 3: systemd integration
+# -----------------------------------------------------------------------------
+
+# Install the systemd unit file that runs the Flask WSGI entry point.
+# Runs as the 'stack' user so the process inherits the same permissions
+# used by the rest of DevStack (read conf file at 640 stack:stack, write
+# logs under /var/log/forensicnova owned by stack:stack, etc.).
+forensicnova_install_systemd_unit() {
+    forensicnova_log "extra" "writing systemd unit ${FORENSICNOVA_SYSTEMD_PATH}"
+    local venv_python="${FORENSICNOVA_DIR}/.venv/bin/python"
+    sudo tee "${FORENSICNOVA_SYSTEMD_PATH}" >/dev/null <<EOF
+[Unit]
+Description=ForensicNova — DFIR memory acquisition service
+Documentation=https://github.com/numdav/forensicnova
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${STACK_USER}
+Group=${STACK_USER}
+WorkingDirectory=${FORENSICNOVA_DIR}
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=${FORENSICNOVA_DIR}
+Environment=FORENSICNOVA_CONFIG=${FORENSICNOVA_CONF_FILE}
+ExecStart=${venv_python} -m app.wsgi
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forensicnova
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo chmod 644 "${FORENSICNOVA_SYSTEMD_PATH}"
+    sudo systemctl daemon-reload
+}
+
+# Enable + start the service, then verify it came up.
+# Non-fatal on failure (we just log a clear diagnostic) to avoid breaking
+# the whole stack.sh run if the Flask app has an issue — reduces blast
+# radius during development.
+forensicnova_start_service() {
+    forensicnova_log "extra" "enabling and starting ${FORENSICNOVA_SYSTEMD_UNIT}"
+    sudo systemctl enable --now "${FORENSICNOVA_SYSTEMD_UNIT}"
+    # Give Flask a moment to bind the port before probing.
+    sleep 2
+    if systemctl is-active --quiet "${FORENSICNOVA_SYSTEMD_UNIT}"; then
+        forensicnova_log "extra" "${FORENSICNOVA_SYSTEMD_UNIT} is active"
+        # Optional liveness probe (best-effort; curl might not be installed
+        # but in a DevStack host it always is).
+        if command -v curl >/dev/null 2>&1; then
+            local probe
+            probe=$(curl -fsS --max-time 3 \
+                "http://127.0.0.1:${FORENSICNOVA_PORT}/health" 2>/dev/null || true)
+            if [[ -n "$probe" ]]; then
+                forensicnova_log "extra" "health probe OK: $probe"
+            else
+                forensicnova_log "extra" \
+                    "WARNING: health probe empty — service up but /health did not respond"
+            fi
+        fi
+    else
+        forensicnova_log "extra" \
+            "WARNING: ${FORENSICNOVA_SYSTEMD_UNIT} is not active — inspect 'journalctl -u ${FORENSICNOVA_SYSTEMD_UNIT}'"
+    fi
 }
 
 # =============================================================================
@@ -188,9 +273,10 @@ install_forensicnova() {
 
 configure_forensicnova() {
     forensicnova_marker "post-config"
-# Controllo di sicurezza credenziali
+    # Credential sanity check
     if [[ -z "$FORENSICNOVA_DFIR_PASSWORD" ]]; then
-        forensicnova_log "post-config" "ERROR: FORENSICNOVA_DFIR_PASSWORD is unset. Set it in local.conf."
+        forensicnova_log "post-config" \
+            "ERROR: FORENSICNOVA_DFIR_PASSWORD is unset. Set it in local.conf."
         return 1
     fi
     forensicnova_ensure_dirs
@@ -203,15 +289,38 @@ init_forensicnova() {
     forensicnova_marker "extra"
     forensicnova_ensure_identity
     forensicnova_ensure_container
-    forensicnova_log "extra" "TODO FASE 3: register Flask service (devstack@forensicnova)"
+    forensicnova_install_systemd_unit
+    forensicnova_start_service
+    forensicnova_log "extra" "FASE 3 init completed"
 }
 
 stop_forensicnova() {
-    forensicnova_marker "unstack" "stop (FASE 2b: no long-running service yet)"
+    forensicnova_marker "unstack"
+    # Idempotent teardown: works whether the unit exists, is enabled,
+    # running, or already gone. Suppress errors — unstack must be robust.
+    if [[ -f "${FORENSICNOVA_SYSTEMD_PATH}" ]] \
+       || systemctl list-unit-files --no-legend 2>/dev/null \
+           | grep -q "^${FORENSICNOVA_SYSTEMD_UNIT}"; then
+        forensicnova_log "unstack" "stopping ${FORENSICNOVA_SYSTEMD_UNIT}"
+        sudo systemctl stop "${FORENSICNOVA_SYSTEMD_UNIT}" 2>/dev/null || true
+        sudo systemctl disable "${FORENSICNOVA_SYSTEMD_UNIT}" 2>/dev/null || true
+    else
+        forensicnova_log "unstack" "no systemd unit to stop"
+    fi
 }
 
 cleanup_forensicnova() {
     forensicnova_marker "clean"
+    # 1) Stop + disable the service (best effort, idempotent).
+    sudo systemctl stop "${FORENSICNOVA_SYSTEMD_UNIT}" 2>/dev/null || true
+    sudo systemctl disable "${FORENSICNOVA_SYSTEMD_UNIT}" 2>/dev/null || true
+    # 2) Remove the unit file and reload systemd so it forgets about it.
+    if [[ -f "${FORENSICNOVA_SYSTEMD_PATH}" ]]; then
+        forensicnova_log "clean" "removing ${FORENSICNOVA_SYSTEMD_PATH}"
+        sudo rm -f "${FORENSICNOVA_SYSTEMD_PATH}"
+        sudo systemctl daemon-reload
+    fi
+    # 3) Drop runtime directories and generated artifacts.
     sudo rm -rf "$FORENSICNOVA_WORK_DIR" "$FORENSICNOVA_LOG_DIR" "$FORENSICNOVA_CONF_DIR"
     rm -f "$FORENSICNOVA_OPENRC"
     rm -rf "$FORENSICNOVA_DIR/.venv"
