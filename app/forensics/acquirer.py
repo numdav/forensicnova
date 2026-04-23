@@ -179,9 +179,6 @@ def acquire_memory(
             "duration_seconds": round(duration, 3),
         })
 
-        # Set restrictive permissions on the dump (contains credentials/keys).
-        dump_path.chmod(0o600)
-
         return dump_path
 
     finally:
