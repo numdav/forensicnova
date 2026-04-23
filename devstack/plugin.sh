@@ -47,7 +47,7 @@ forensicnova_ensure_dirs() {
 }
 
 # Keystone identity artifacts: role, project, user, role assignments.
-# Also grants dfir-tester the 'reader' role on EVERY existing project
+# Also grants dfir-tester the 'admin' role on EVERY existing project
 # so the forensic analyst can read metadata of any tenant's VMs
 # (needed by Nova/Glance API calls in app/forensics/nova_metadata.py).
 # Read-only cross-tenant visibility is the DFIR analyst contract.
@@ -71,11 +71,11 @@ forensicnova_ensure_identity() {
     get_or_add_user_project_role "admin" \
         "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
 
-    # Cross-tenant reader role: grant 'reader' on every existing project
+    # Cross-tenant admin role: grant 'admin' on every existing project
     # so dfir-tester can query Nova/Glance metadata for any VM regardless
     # of its owner project.  Idempotent via get_or_add_user_project_role.
     forensicnova_log "extra" \
-        "granting 'reader' role on all projects to ${FORENSICNOVA_DFIR_USER}"
+        "granting 'admin' role on all projects to ${FORENSICNOVA_DFIR_USER}"
     local project
     for project in $(openstack project list -c Name -f value 2>/dev/null); do
         # Skip service and internal projects we don't want the DFIR user in.
@@ -87,7 +87,7 @@ forensicnova_ensure_identity() {
         get_or_add_user_project_role "admin" \
             "$FORENSICNOVA_DFIR_USER" "$project" || \
             forensicnova_log "extra" \
-                "WARNING: could not add reader role on project '$project' (non-fatal)"
+                "WARNING: could not add admin role on project '$project' (non-fatal)"
     done
 }
 
