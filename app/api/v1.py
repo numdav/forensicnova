@@ -9,15 +9,24 @@ Authentication contract:
         HTTP_X_IDENTITY_STATUS  in {"Confirmed", "Invalid", missing}
         HTTP_X_USER_NAME        Keystone username (when Confirmed)
         HTTP_X_ROLES            comma-separated list of role names
-  - The before_request hook below enforces:
+  - The before_request hook enforces:
         IDENTITY_STATUS == "Confirmed"        else 401
         "forensic_analyst" in X_ROLES         else 403
 
-Endpoint:
-  POST /api/v1/servers/<instance_id>/memory_acquire
-      Acquire RAM of <instance_id>, hash, upload to Swift, return report.
-      Synchronous: blocks until completion (FASE 4 prototype).
-      Async with Celery is a thesis-scope improvement.
+Pipeline ordering (FASE 4, final):
+  1. acquire_memory         (libvirt dump, chown, staging)
+  2. compute_hashes         (MD5 + SHA1 streaming)
+  3. upload_dump            (Swift PUT + etag verification)
+  4. secure_delete          (shred -u local dump; only if etag verified)
+  5. nova_metadata.collect  (Nova + Glance + libvirt XML, hypervisor-side only)
+  6. generate_report        (all CoC events captured including delete)
+  7. upload_json            (report as second Swift object)
+
+Design note — forensic safety of target_system enrichment:
+  nova_metadata.collect() is invoked ONLY after the dump is already safely
+  on Swift.  Even if the Nova/Glance/libvirt queries fail, the acquisition
+  is considered successful and the report is still produced with the
+  metadata fields set to None.  Enrichment MUST NEVER read from the guest.
 """
 from __future__ import annotations
 
@@ -29,6 +38,7 @@ import libvirt
 from flask import Blueprint, current_app, jsonify, request
 
 from app.forensics.acquirer import acquire_memory, secure_delete
+from app.forensics import nova_metadata
 from app.hashing.hasher import compute_hashes
 from app.reports.chain_of_custody import ChainOfCustody
 from app.reports.json_report import generate_report, serialize_report
@@ -44,7 +54,7 @@ api_v1_bp = Blueprint("api_v1", __name__)
 
 
 # ---------------------------------------------------------------------------
-# Authentication / authorisation gate (runs before every v1 endpoint)
+# Authentication / authorisation gate
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.before_request
@@ -71,11 +81,9 @@ def require_forensic_analyst():
             current_roles=roles,
         ), 403
 
-    # OK — let the endpoint run.
-
 
 # ---------------------------------------------------------------------------
-# POST /servers/<instance_id>/memory_acquire — main DFIR orchestrator
+# POST /servers/<instance_id>/memory_acquire
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route(
@@ -83,16 +91,14 @@ def require_forensic_analyst():
     methods=["POST"],
 )
 def memory_acquire(instance_id: str):
-    """Acquire RAM of a Nova instance, hash it, upload to Swift, return report.
-
-    :path instance_id: Nova instance UUID (resolved to libvirt domain).
-    :returns: 201 + JSON summary on success, error JSON on failure.
-    """
+    """Acquire RAM of a Nova instance, hash, upload to Swift, return report."""
     cfg = current_app.config["FORENSICNOVA"]
     tool_version = current_app.config["VERSION"]
     operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
 
     acquisition_id = str(uuid.uuid4())
+    started_at = _utc_now_iso()
+
     coc = ChainOfCustody(
         acquisition_id=acquisition_id,
         operator=operator,
@@ -110,10 +116,7 @@ def memory_acquire(instance_id: str):
     })
 
     try:
-        # -----------------------------------------------------------------
-        # 1. Acquire RAM via libvirt (acquirer logs domain_lookup,
-        #    virsh_dump_started, virsh_dump_completed events)
-        # -----------------------------------------------------------------
+        # 1. Acquire RAM via libvirt
         dump_path = acquire_memory(
             instance_id=instance_id,
             acquisition_id=acquisition_id,
@@ -121,18 +124,12 @@ def memory_acquire(instance_id: str):
             libvirt_uri=cfg.libvirt_uri,
             log_event=coc.log_event,
         )
-
-        # Re-resolve domain name for the report (acquirer doesn't return it).
         domain_name = _lookup_domain_name(cfg.libvirt_uri, instance_id)
 
-        # -----------------------------------------------------------------
         # 2. Hash the dump (streaming MD5 + SHA1)
-        # -----------------------------------------------------------------
         hash_result = compute_hashes(dump_path, log_event=coc.log_event)
 
-        # -----------------------------------------------------------------
         # 3. Upload dump to Swift with etag verification
-        # -----------------------------------------------------------------
         swift_object_name = f"dump-{acquisition_id}.raw"
         swift_metadata = {
             "acquisition_id": acquisition_id,
@@ -152,33 +149,7 @@ def memory_acquire(instance_id: str):
             log_event=coc.log_event,
         )
 
-        # -----------------------------------------------------------------
-        # 4. Build the JSON report (embeds the full CoC trail)
-        # -----------------------------------------------------------------
-        report = generate_report(
-            acquisition_id=acquisition_id,
-            operator=operator,
-            instance_id=instance_id,
-            instance_name=domain_name,  # Nova display name lookup deferred
-            domain_name=domain_name,
-            hash_result=hash_result,
-            swift_result=swift_result,
-            tool_version=tool_version,
-            timestamp=_utc_now_iso(),
-            events=coc.events,
-        )
-        report_bytes = serialize_report(report)
-        report_object_name = f"report-{acquisition_id}.json"
-        report_swift_result = upload_json(
-            json_bytes=report_bytes,
-            object_name=report_object_name,
-            cfg=cfg,
-            log_event=coc.log_event,
-        )
-
-        # -----------------------------------------------------------------
-        # 5. Secure delete local dump — ONLY if upload was etag-verified
-        # -----------------------------------------------------------------
+        # 4. Secure-delete local dump — ONLY if etag verified.
         if swift_result["etag_verified"]:
             secure_delete(dump_path)
             coc.log_event("local_dump_secure_deleted", {
@@ -193,9 +164,43 @@ def memory_acquire(instance_id: str):
                 "reason": "etag_not_verified",
             })
 
-        # -----------------------------------------------------------------
-        # 6. Respond with summary
-        # -----------------------------------------------------------------
+        # 5. Collect OpenStack-side metadata for target_system block.
+        #    Never raises — returns dict with None-filled fields on failure.
+        target_system = nova_metadata.collect(
+            instance_id=instance_id,
+            domain_name=domain_name,
+            libvirt_uri=cfg.libvirt_uri,
+            cfg=cfg,
+        )
+
+        # 6. Generate JSON report (captures full CoC trail through step 4).
+        completed_at = _utc_now_iso()
+        report = generate_report(
+            acquisition_id=acquisition_id,
+            operator=operator,
+            instance_id=instance_id,
+            instance_name=(target_system.get("nova", {}) or {}).get("name") or domain_name,
+            domain_name=domain_name,
+            hash_result=hash_result,
+            swift_result=swift_result,
+            tool_version=tool_version,
+            timestamp=completed_at,
+            started_at=started_at,
+            target_system=target_system,
+            events=list(coc.events),
+        )
+        report_bytes = serialize_report(report)
+        report_object_name = f"report-{acquisition_id}.json"
+
+        # 7. Upload report to Swift.
+        report_swift_result = upload_json(
+            json_bytes=report_bytes,
+            object_name=report_object_name,
+            cfg=cfg,
+            log_event=coc.log_event,
+        )
+
+        # 8. Respond with summary
         log.info(
             "memory_acquire DONE: acq_id=%s size=%d md5=%s",
             acquisition_id, hash_result["size_bytes"], hash_result["md5"],
@@ -206,6 +211,8 @@ def memory_acquire(instance_id: str):
             "instance_id":         instance_id,
             "domain_name":         domain_name,
             "operator":            operator,
+            "started_at":          started_at,
+            "completed_at":        completed_at,
             "size_bytes":          hash_result["size_bytes"],
             "md5":                 hash_result["md5"],
             "sha1":                hash_result["sha1"],
@@ -214,10 +221,6 @@ def memory_acquire(instance_id: str):
             "report_swift_object": report_swift_result["swift_object"],
         }), 201
 
-    # -----------------------------------------------------------------
-    # Error handling: distinct status codes for distinct failure modes,
-    # all events also captured in the CoC trail.
-    # -----------------------------------------------------------------
     except IntegrityError as exc:
         log.error("integrity failure acq=%s: %s", acquisition_id, exc)
         coc.log_event("acquisition_failed", {

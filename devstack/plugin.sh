@@ -184,6 +184,7 @@ forensicnova_install_python_deps() {
         python-swiftclient \
         python-keystoneclient \
         python-novaclient \
+        python-glanceclient \
         keystonemiddleware \
         requests \
         libvirt-python
