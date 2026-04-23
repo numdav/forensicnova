@@ -9,23 +9,11 @@
 #   stack extra         -> init_forensicnova        (keystone, swift, systemd)
 #   unstack             -> stop_forensicnova        (stop systemd unit)
 #   clean               -> cleanup_forensicnova     (remove unit + data)
-#
-# Docs: https://docs.openstack.org/devstack/latest/plugins.html
 
-# Resolve plugin dir and (re-)source settings defensively.
 FORENSICNOVA_PLUGIN_DIR=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")")
 # shellcheck disable=SC1091
 source "${FORENSICNOVA_PLUGIN_DIR}/settings"
 
-# =============================================================================
-# Constants local to FASE 3+ systemd management
-# =============================================================================
-#
-# The unit is named devstack@forensicnova.service for visual consistency
-# with the rest of DevStack (n-api, n-cpu, g-api, q-svc, s-proxy, ...).
-# It is a CONCRETE unit file, not an instance of the DevStack template —
-# systemd resolves concrete files before templates, so this is safe and
-# keeps our plugin independent from DevStack's internal unit template.
 FORENSICNOVA_SYSTEMD_UNIT="devstack@forensicnova.service"
 FORENSICNOVA_SYSTEMD_PATH="/etc/systemd/system/${FORENSICNOVA_SYSTEMD_UNIT}"
 
@@ -34,7 +22,6 @@ FORENSICNOVA_SYSTEMD_PATH="/etc/systemd/system/${FORENSICNOVA_SYSTEMD_UNIT}"
 # =============================================================================
 
 forensicnova_marker() {
-    # Single-line greppable marker ("[ForensicNova][<phase>] marker")
     local phase="$1"
     local msg="${2:-marker}"
     echo "[ForensicNova][${phase}] ${msg}"
@@ -49,7 +36,6 @@ forensicnova_log() {
 # Idempotent building blocks
 # =============================================================================
 
-# Create host-side directories with correct ownership and permissions.
 forensicnova_ensure_dirs() {
     forensicnova_log "post-config" "ensuring runtime directories"
     local d
@@ -60,32 +46,49 @@ forensicnova_ensure_dirs() {
     done
 }
 
-# Keystone identity artifacts: role + project + user + role assignments.
-# Uses DevStack's native idempotent helpers (from lib/keystone).
+# Keystone identity artifacts: role, project, user, role assignments.
+# Also grants dfir-tester the 'reader' role on EVERY existing project
+# so the forensic analyst can read metadata of any tenant's VMs
+# (needed by Nova/Glance API calls in app/forensics/nova_metadata.py).
+# Read-only cross-tenant visibility is the DFIR analyst contract.
 forensicnova_ensure_identity() {
     forensicnova_log "extra" "ensuring Keystone identity artifacts"
 
-    # Custom role for forensic analysts
+    # Custom role for forensic analysts.
     get_or_create_role "$FORENSICNOVA_ROLE"
 
-    # Dedicated project for DFIR artifacts
+    # Dedicated project for DFIR artifacts.
     get_or_create_project "$FORENSICNOVA_PROJECT" default \
         "$FORENSICNOVA_PROJECT_DESCRIPTION"
 
-    # Test user (password, domain)
+    # Test user and base role assignments in the 'forensics' project.
     get_or_create_user "$FORENSICNOVA_DFIR_USER" \
         "$FORENSICNOVA_DFIR_PASSWORD" default
-
-    # Assignments: custom role for our plugin policy + member for baseline ops
     get_or_add_user_project_role "$FORENSICNOVA_ROLE" \
         "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
     get_or_add_user_project_role "member" \
         "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
+
+    # Cross-tenant reader role: grant 'reader' on every existing project
+    # so dfir-tester can query Nova/Glance metadata for any VM regardless
+    # of its owner project.  Idempotent via get_or_add_user_project_role.
+    forensicnova_log "extra" \
+        "granting 'reader' role on all projects to ${FORENSICNOVA_DFIR_USER}"
+    local project
+    for project in $(openstack project list -c Name -f value 2>/dev/null); do
+        # Skip service and internal projects we don't want the DFIR user in.
+        case "$project" in
+            service)
+                continue
+                ;;
+        esac
+        get_or_add_user_project_role "reader" \
+            "$FORENSICNOVA_DFIR_USER" "$project" || \
+            forensicnova_log "extra" \
+                "WARNING: could not add reader role on project '$project' (non-fatal)"
+    done
 }
 
-# Swift container in the 'forensics' project (NOT admin).
-# We scope the call via a subshell with overridden OS_* variables so we don't
-# pollute the admin environment that DevStack relies on for the rest of setup.
 forensicnova_ensure_container() {
     forensicnova_log "extra" \
         "ensuring Swift container '$FORENSICNOVA_SWIFT_CONTAINER' in project '$FORENSICNOVA_PROJECT'"
@@ -95,14 +98,11 @@ forensicnova_ensure_container() {
         export OS_PROJECT_NAME="$FORENSICNOVA_PROJECT"
         export OS_USER_DOMAIN_ID=default
         export OS_PROJECT_DOMAIN_ID=default
-        # OS_AUTH_URL, OS_IDENTITY_API_VERSION, OS_REGION_NAME are inherited
-        # from the admin openrc already sourced by DevStack.
         openstack container show "$FORENSICNOVA_SWIFT_CONTAINER" >/dev/null 2>&1 \
             || openstack container create "$FORENSICNOVA_SWIFT_CONTAINER" >/dev/null
     )
 }
 
-# Write /etc/forensicnova/forensicnova.conf (regenerated every stack.sh run).
 forensicnova_write_config() {
     forensicnova_log "post-config" "writing $FORENSICNOVA_CONF_FILE"
     sudo tee "$FORENSICNOVA_CONF_FILE" >/dev/null <<EOF
@@ -121,14 +121,6 @@ auth_url = http://${HOST_IP}/identity
 region_name = RegionOne
 forensic_role = ${FORENSICNOVA_ROLE}
 
-[swift]
-container = ${FORENSICNOVA_SWIFT_CONTAINER}
-# Swift endpoint is discovered via the Keystone service catalog at runtime.
-
-[forensics]
-project = ${FORENSICNOVA_PROJECT}
-dfir_user = ${FORENSICNOVA_DFIR_USER}
-
 [keystone_authtoken]
 www_authenticate_uri = http://${HOST_IP}/identity
 auth_url = http://${HOST_IP}/identity
@@ -141,6 +133,13 @@ password = ${ADMIN_PASSWORD}
 delay_auth_decision = true
 interface = public
 
+[swift]
+container = ${FORENSICNOVA_SWIFT_CONTAINER}
+
+[forensics]
+project = ${FORENSICNOVA_PROJECT}
+dfir_user = ${FORENSICNOVA_DFIR_USER}
+
 [libvirt]
 uri = qemu:///system
 EOF
@@ -148,7 +147,6 @@ EOF
     sudo chmod 640 "$FORENSICNOVA_CONF_FILE"
 }
 
-# Regenerate /opt/stack/devstack/openrc-dfir for manual testing.
 forensicnova_write_openrc() {
     forensicnova_log "post-config" "writing $FORENSICNOVA_OPENRC"
     cat > "$FORENSICNOVA_OPENRC" <<EOF
@@ -168,14 +166,10 @@ EOF
     chmod 600 "$FORENSICNOVA_OPENRC"
 }
 
-# Create dedicated virtualenv and install Python dependencies.
 forensicnova_install_python_deps() {
     forensicnova_log "install" \
         "creating venv and installing Python deps in $FORENSICNOVA_DIR/.venv"
     python3 -m venv "$FORENSICNOVA_DIR/.venv"
-    # IMPORTANT: never 'source activate' this venv from within plugin.sh —
-    # it contaminates PATH and breaks Neutron later. Always call the venv's
-    # pip/python by absolute path. See SITREP Fix #1.
     local venv_pip="$FORENSICNOVA_DIR/.venv/bin/pip"
     "$venv_pip" install --quiet --disable-pip-version-check --upgrade pip setuptools wheel
     "$venv_pip" install --quiet --disable-pip-version-check \
@@ -190,14 +184,6 @@ forensicnova_install_python_deps() {
         libvirt-python
 }
 
-# -----------------------------------------------------------------------------
-# FASE 3: systemd integration
-# -----------------------------------------------------------------------------
-
-# Install the systemd unit file that runs the Flask WSGI entry point.
-# Runs as the 'stack' user so the process inherits the same permissions
-# used by the rest of DevStack (read conf file at 640 stack:stack, write
-# logs under /var/log/forensicnova owned by stack:stack, etc.).
 forensicnova_install_systemd_unit() {
     forensicnova_log "extra" "writing systemd unit ${FORENSICNOVA_SYSTEMD_PATH}"
     local venv_python="${FORENSICNOVA_DIR}/.venv/bin/python"
@@ -231,19 +217,12 @@ EOF
     sudo systemctl daemon-reload
 }
 
-# Enable + start the service, then verify it came up.
-# Non-fatal on failure (we just log a clear diagnostic) to avoid breaking
-# the whole stack.sh run if the Flask app has an issue — reduces blast
-# radius during development.
 forensicnova_start_service() {
     forensicnova_log "extra" "enabling and starting ${FORENSICNOVA_SYSTEMD_UNIT}"
     sudo systemctl enable --now "${FORENSICNOVA_SYSTEMD_UNIT}"
-    # Give Flask a moment to bind the port before probing.
     sleep 2
     if systemctl is-active --quiet "${FORENSICNOVA_SYSTEMD_UNIT}"; then
         forensicnova_log "extra" "${FORENSICNOVA_SYSTEMD_UNIT} is active"
-        # Optional liveness probe (best-effort; curl might not be installed
-        # but in a DevStack host it always is).
         if command -v curl >/dev/null 2>&1; then
             local probe
             probe=$(curl -fsS --max-time 3 \
@@ -267,14 +246,12 @@ forensicnova_start_service() {
 
 preinstall_forensicnova() {
     forensicnova_marker "pre-install"
-    # virsh sanity check (non-fatal; all-in-one DevStack has it via n-cpu)
     if ! command -v virsh >/dev/null 2>&1; then
         forensicnova_log "pre-install" \
             "WARNING: virsh not found — memory acquisition requires libvirt on the compute node"
     else
         forensicnova_log "pre-install" "virsh available: $(command -v virsh)"
     fi
-    # python3-venv is required for the dedicated virtualenv created in 'install'
     if ! dpkg -s python3-venv libvirt-dev pkg-config >/dev/null 2>&1; then
         forensicnova_log "pre-install" "installing system dependencies (python3-venv, libvirt-dev, pkg-config)"
         sudo apt-get install -y python3-venv libvirt-dev pkg-config
@@ -288,7 +265,6 @@ install_forensicnova() {
 
 configure_forensicnova() {
     forensicnova_marker "post-config"
-    # Credential sanity check
     if [[ -z "$FORENSICNOVA_DFIR_PASSWORD" ]]; then
         forensicnova_log "post-config" \
             "ERROR: FORENSICNOVA_DFIR_PASSWORD is unset. Set it in local.conf."
@@ -311,8 +287,6 @@ init_forensicnova() {
 
 stop_forensicnova() {
     forensicnova_marker "unstack"
-    # Idempotent teardown: works whether the unit exists, is enabled,
-    # running, or already gone. Suppress errors — unstack must be robust.
     if [[ -f "${FORENSICNOVA_SYSTEMD_PATH}" ]] \
        || systemctl list-unit-files --no-legend 2>/dev/null \
            | grep -q "^${FORENSICNOVA_SYSTEMD_UNIT}"; then
@@ -326,23 +300,20 @@ stop_forensicnova() {
 
 cleanup_forensicnova() {
     forensicnova_marker "clean"
-    # 1) Stop + disable the service (best effort, idempotent).
     sudo systemctl stop "${FORENSICNOVA_SYSTEMD_UNIT}" 2>/dev/null || true
     sudo systemctl disable "${FORENSICNOVA_SYSTEMD_UNIT}" 2>/dev/null || true
-    # 2) Remove the unit file and reload systemd so it forgets about it.
     if [[ -f "${FORENSICNOVA_SYSTEMD_PATH}" ]]; then
         forensicnova_log "clean" "removing ${FORENSICNOVA_SYSTEMD_PATH}"
         sudo rm -f "${FORENSICNOVA_SYSTEMD_PATH}"
         sudo systemctl daemon-reload
     fi
-    # 3) Drop runtime directories and generated artifacts.
     sudo rm -rf "$FORENSICNOVA_WORK_DIR" "$FORENSICNOVA_LOG_DIR" "$FORENSICNOVA_CONF_DIR"
     rm -f "$FORENSICNOVA_OPENRC"
     rm -rf "$FORENSICNOVA_DIR/.venv"
 }
 
 # =============================================================================
-# Dispatcher — DevStack invokes this script with positional args
+# Dispatcher
 # =============================================================================
 
 if [[ "$1" == "stack" ]]; then
@@ -351,7 +322,7 @@ if [[ "$1" == "stack" ]]; then
         install)      install_forensicnova ;;
         post-config)  configure_forensicnova ;;
         extra)        init_forensicnova ;;
-        *)            : ;;  # test-config and others: no-op
+        *)            : ;;
     esac
 elif [[ "$1" == "unstack" ]]; then
     stop_forensicnova
