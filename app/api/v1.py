@@ -9,6 +9,11 @@ Authentication contract:
         IDENTITY_STATUS == "Confirmed"    else 401
         "forensic_analyst" in X_ROLES     else 403
 
+Endpoints:
+  POST /servers/<instance_id>/memory_acquire   — trigger acquisition pipeline
+  GET  /acquisitions/                          — list all acquisitions (summary)
+  GET  /acquisitions/<acquisition_id>          — full report for one acquisition
+
 Pipeline ordering (FASE 4 final):
   1. acquire_memory         (libvirt dump, chown, staging)
   2. compute_hashes         (MD5 + SHA1 streaming)
@@ -23,6 +28,7 @@ Object naming: dump-<sanitized_vm>-<YYYYMMDDTHHMMSSZ>.raw
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -38,6 +44,9 @@ from app.reports.chain_of_custody import ChainOfCustody
 from app.reports.json_report import generate_report, serialize_report
 from app.storage.swift_client import (
     IntegrityError,
+    SwiftObjectNotFound,
+    download_json,
+    list_reports,
     upload_dump,
     upload_json,
 )
@@ -277,8 +286,156 @@ def memory_acquire(instance_id: str):
 
 
 # ---------------------------------------------------------------------------
+# GET /acquisitions/   — list summary
+# ---------------------------------------------------------------------------
+
+@api_v1_bp.route("/acquisitions/", methods=["GET"])
+def list_acquisitions():
+    """List all acquisitions by scanning Swift 'report-*.json' objects.
+
+    Strategy: naive-but-correct full scan.
+      - 1 HTTP call to Swift to list container contents (filtered by prefix).
+      - N HTTP calls to Swift to download each report JSON.
+      - Extract summary fields from each report.
+      - Skip broken reports with a warning (log only); never fail the whole list.
+      - Sort by completed_at DESC (most recent first).
+
+    For the exam prototype this scales comfortably to hundreds of acquisitions.
+    Thesis optimization: store summary fields as X-Object-Meta-* headers on
+    upload, then a single HEAD per object suffices — no body download.
+    """
+    cfg = current_app.config["FORENSICNOVA"]
+    operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
+
+    log.info("list_acquisitions: operator=%s", operator)
+
+    try:
+        report_names = list_reports(cfg)
+    except Exception as exc:
+        log.exception("list_reports failed")
+        return jsonify(
+            error="swift_list_failed",
+            detail=str(exc),
+        ), 502
+
+    summaries: list[dict] = []
+    for name in report_names:
+        try:
+            raw = download_json(name, cfg)
+            report = json.loads(raw.decode("utf-8"))
+            summaries.append(_build_summary(report, name))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "skipping unreadable report object %s: %s", name, exc,
+            )
+            continue
+
+    summaries.sort(
+        key=lambda s: s.get("completed_at") or "",
+        reverse=True,
+    )
+
+    log.info(
+        "list_acquisitions: returned %d summaries (from %d objects)",
+        len(summaries), len(report_names),
+    )
+    return jsonify({
+        "count":        len(summaries),
+        "acquisitions": summaries,
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /acquisitions/<acquisition_id>   — full report
+# ---------------------------------------------------------------------------
+
+@api_v1_bp.route("/acquisitions/<acquisition_id>", methods=["GET"])
+def get_acquisition(acquisition_id: str):
+    """Fetch the full JSON report for a specific acquisition.
+
+    Strategy: full scan of report-*.json objects, return the one whose
+    'acquisition_id' field matches.  Inefficient by design (N downloads)
+    but keeps the API stateless and always consistent with Swift —
+    no separate index to get out of sync.
+
+    Thesis optimization: on upload, set X-Object-Meta-Acquisition-Id header;
+    then a single Swift listing with metadata filter replaces the scan.
+    """
+    cfg = current_app.config["FORENSICNOVA"]
+    operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
+
+    log.info(
+        "get_acquisition: acq_id=%s operator=%s",
+        acquisition_id, operator,
+    )
+
+    try:
+        report_names = list_reports(cfg)
+    except Exception as exc:
+        log.exception("list_reports failed")
+        return jsonify(
+            error="swift_list_failed",
+            detail=str(exc),
+        ), 502
+
+    for name in report_names:
+        try:
+            raw = download_json(name, cfg)
+            report = json.loads(raw.decode("utf-8"))
+        except SwiftObjectNotFound:
+            # Race condition: report was listed but deleted before we could
+            # fetch it.  Not our acquisition, skip.
+            continue
+        except Exception as exc:  # noqa: BLE001
+            log.warning("skipping unreadable report %s: %s", name, exc)
+            continue
+
+        if report.get("acquisition_id") == acquisition_id:
+            log.info(
+                "get_acquisition: match found in %s", name,
+            )
+            return jsonify(report), 200
+
+    log.info(
+        "get_acquisition: no match for acq_id=%s (scanned %d objects)",
+        acquisition_id, len(report_names),
+    )
+    return jsonify(
+        error="not_found",
+        detail=f"no acquisition found with id {acquisition_id}",
+        acquisition_id=acquisition_id,
+    ), 404
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _build_summary(report: dict, object_name: str) -> dict:
+    """Project a full report JSON onto a compact summary dict for listing."""
+    dump       = report.get("dump", {}) or {}
+    instance   = report.get("instance", {}) or {}
+    timestamps = report.get("timestamps", {}) or {}
+    report_blk = report.get("report", {}) or {}
+
+    return {
+        "acquisition_id":   report.get("acquisition_id"),
+        "operator":         report.get("operator"),
+        "vm_name":          instance.get("name"),
+        "instance_id":      instance.get("id"),
+        "domain_name":      instance.get("domain"),
+        "started_at":       timestamps.get("started_at"),
+        "completed_at":     timestamps.get("completed_at"),
+        "duration_seconds": timestamps.get("duration_seconds"),
+        "size_bytes":       dump.get("size_bytes"),
+        "md5":              dump.get("md5"),
+        "sha1":             dump.get("sha1"),
+        "etag_verified":    dump.get("etag_verified"),
+        "swift_dump":       dump.get("swift_object"),
+        "swift_report":     report_blk.get("swift_object"),
+        "report_object":    object_name,
+    }
+
 
 def _lookup_domain_name(libvirt_uri: str, instance_id: str) -> str:
     conn = libvirt.open(libvirt_uri)

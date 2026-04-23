@@ -3,7 +3,7 @@
 Uses python-swiftclient in the two-step pattern:
   1. Authenticate against Keystone via swiftclient.client.get_auth() to obtain
      a (storage_url, auth_token) tuple.
-  2. Upload artifacts with swiftclient.client.put_object(url=..., token=..., ...).
+  2. Upload/list/download artifacts with swiftclient.client.*(url=..., token=...).
 
 This is the official pattern from the python-swiftclient docs; the earlier
 attempt of passing authurl/user/key directly to put_object() was wrong and
@@ -25,6 +25,12 @@ Credentials:
 Upload strategy:
   - Files < SIMPLE_UPLOAD_THRESHOLD (4 GB): single PUT, ETag = MD5(content).
   - Files >= threshold: Swift Large Object (SLO) — deferred to thesis.
+
+Read operations (added in FASE 5):
+  - list_reports()  : enumerate report-*.json objects in the forensics container.
+  - download_json() : fetch a single JSON object as bytes (caller parses).
+  No CoC events are emitted on read operations — the chain of custody is
+  concerned with evidence genesis, not post-hoc consultation.
 """
 from __future__ import annotations
 
@@ -41,6 +47,10 @@ log = logging.getLogger("forensicnova.storage")
 SIMPLE_UPLOAD_THRESHOLD = 4 * 1024 ** 3  # 4 GB
 _PASSWORD_ENV = "FORENSICNOVA_DFIR_PASSWORD"
 
+# Prefix used for JSON report objects in Swift — must stay in sync with the
+# naming convention enforced by app/api/v1.py:memory_acquire().
+REPORT_OBJECT_PREFIX = "report-"
+
 
 class IntegrityError(RuntimeError):
     """Raised when Swift ETag does not match the locally computed MD5.
@@ -50,8 +60,12 @@ class IntegrityError(RuntimeError):
     """
 
 
+class SwiftObjectNotFound(RuntimeError):
+    """Raised when a requested Swift object does not exist in the container."""
+
+
 # ---------------------------------------------------------------------------
-# Public API
+# Public API — writes
 # ---------------------------------------------------------------------------
 
 def upload_dump(
@@ -171,6 +185,93 @@ def upload_json(
         "swift_etag":   (swift_etag or "").strip('"'),
         "size_bytes":   len(json_bytes),
     }
+
+
+# ---------------------------------------------------------------------------
+# Public API — reads (FASE 5)
+# ---------------------------------------------------------------------------
+
+def list_reports(
+    cfg,
+    password: Optional[str] = None,
+) -> list[str]:
+    """Enumerate JSON report objects in the forensics container.
+
+    Returns the list of object names matching the 'report-' prefix and
+    ending in '.json', sorted lexicographically (which, thanks to the
+    YYYYMMDDTHHMMSSZ timestamp in the naming convention, equals
+    chronological order).
+
+    This is a single Swift HTTP GET against the container — cheap even
+    for hundreds of reports.
+    """
+    password = _resolve_password(password)
+    container = cfg.swift_container
+
+    url, token = _authenticate(cfg, password)
+
+    log.debug("listing container %s with prefix=%r", container, REPORT_OBJECT_PREFIX)
+
+    try:
+        _headers, objects = swiftclient.client.get_container(
+            url=url,
+            token=token,
+            container=container,
+            prefix=REPORT_OBJECT_PREFIX,
+            full_listing=True,
+        )
+    except swiftclient.exceptions.ClientException as exc:
+        if getattr(exc, "http_status", None) == 404:
+            log.warning("container %s does not exist yet", container)
+            return []
+        raise
+
+    names = [
+        obj["name"]
+        for obj in objects
+        if obj.get("name", "").endswith(".json")
+    ]
+    log.info("list_reports: found %d report objects in %s", len(names), container)
+    return sorted(names)
+
+
+def download_json(
+    object_name: str,
+    cfg,
+    password: Optional[str] = None,
+) -> bytes:
+    """Download a single JSON object from Swift as raw bytes.
+
+    Caller is responsible for json.loads() — keeping this client
+    format-agnostic preserves a clean separation between storage and
+    content parsing.
+
+    :raises SwiftObjectNotFound: if the object does not exist in the container.
+    """
+    password = _resolve_password(password)
+    container = cfg.swift_container
+
+    url, token = _authenticate(cfg, password)
+
+    log.debug("downloading swift://%s/%s", container, object_name)
+
+    try:
+        _headers, content = swiftclient.client.get_object(
+            url=url,
+            token=token,
+            container=container,
+            name=object_name,
+        )
+    except swiftclient.exceptions.ClientException as exc:
+        if getattr(exc, "http_status", None) == 404:
+            raise SwiftObjectNotFound(
+                f"object not found: {container}/{object_name}"
+            ) from exc
+        raise
+
+    size = len(content) if isinstance(content, (bytes, bytearray)) else -1
+    log.debug("downloaded %s (%d bytes)", object_name, size)
+    return content
 
 
 # ---------------------------------------------------------------------------
