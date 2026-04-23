@@ -21,25 +21,23 @@ Design rationale:
 
 4. Authentication — Keystone middleware wiring (per official docs)
    - https://docs.openstack.org/keystonemiddleware/latest/middlewarearchitecture.html
-   - AuthProtocol does NOT accept auth parameters as a raw dict.
-     Supported patterns:
-        (a) paste-deploy pipeline with [keystone_authtoken] INI loaded
-            globally by oslo.config.
-        (b) programmatic: build a ConfigOpts, load the INI file, then pass
-            it as {"oslo_config_config": CONF} to AuthProtocol.
-     We use pattern (b) because ForensicNova is a standalone Flask app.
-   - IMPORTANT: we do NOT pre-register the middleware's own options
-     (auth_type, auth_url, delay_auth_decision, ...).  The middleware
-     registers them itself on the CONF we pass in, and pre-registering
-     triggers DuplicateOptError.  We simply load the INI file and let
-     the middleware find the values there.
-   - delay_auth_decision=True is forced via set_override() AFTER the
-     middleware has registered its options.  Policy: /health must stay
-     unauthenticated; per-blueprint before_request hooks enforce auth.
+   - Pattern used: programmatic oslo.config.
+       * Build an empty oslo_config.cfg.ConfigOpts.
+       * Load the INI file — values stay unparsed until someone
+         registers the options, which the middleware does in its __init__.
+       * Pass {"oslo_config_config": CONF} to AuthProtocol.
+   - IMPORTANT: we do NOT pre-register the middleware's own options.
+     AuthProtocol.__init__ registers them itself on the CONF we pass in;
+     pre-registering triggers DuplicateOptError.
+   - IMPORTANT: delay_auth_decision and all other [keystone_authtoken]
+     values MUST be set in the INI file before wrapping, because the
+     middleware reads them during __init__.  set_override() after the
+     fact has no effect on the already-initialised middleware instance.
+   - Policy choice: delay_auth_decision=true is set in the INI so that
+     /health stays unauthenticated (no token required) and each
+     blueprint enforces auth via its own before_request hook.
    - The middleware authenticates as a service user (admin) with enough
-     privilege to validate arbitrary tokens.  Credentials live in
-     [keystone_authtoken] inside /etc/forensicnova/forensicnova.conf,
-     written by devstack/plugin.sh.
+     privilege to validate arbitrary tokens against Keystone.
 """
 from __future__ import annotations
 
@@ -95,14 +93,11 @@ def _configure_logging(app: Flask, cfg: Config) -> None:
 def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
     """Wrap app.wsgi_app with keystonemiddleware.auth_token.
 
-    Pattern (b) from the module docstring:
-      1. Build an empty oslo_config.cfg.ConfigOpts.
-      2. Load our INI file into it (values stay unparsed until options
-         are registered by someone — namely the middleware itself).
-      3. Pass {"oslo_config_config": CONF} to AuthProtocol.  The
-         middleware registers its opts on CONF and reads the values
-         from [keystone_authtoken].
-      4. Force delay_auth_decision=True via set_override().
+    Pattern (b) from the module docstring: build an oslo.config ConfigOpts,
+    load the INI file, hand it to AuthProtocol via oslo_config_config.
+    All middleware parameters (including delay_auth_decision) come from
+    [keystone_authtoken] in the INI — do NOT try to override them
+    programmatically after middleware instantiation.
     """
     missing = []
     if not cfg.keystone_authtoken_username:
@@ -137,15 +132,9 @@ def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
             default_config_files=[cfg.config_path],
             project="forensicnova",
         )
-        # The middleware will register [keystone_authtoken] opts on CONF
-        # inside AuthProtocol.__init__ and then read them.
         app.wsgi_app = auth_token.AuthProtocol(
             app.wsgi_app,
             {"oslo_config_config": CONF},
-        )
-        # Force delay_auth_decision=True AFTER middleware registered opts.
-        CONF.set_override(
-            "delay_auth_decision", True, group="keystone_authtoken",
         )
     except Exception as exc:  # noqa: BLE001
         app.logger.exception(
@@ -154,7 +143,7 @@ def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
         return
 
     app.logger.info(
-        "keystonemiddleware wired (service_user=%s, delay_auth_decision=True)",
+        "keystonemiddleware wired (service_user=%s)",
         cfg.keystone_authtoken_username,
     )
 

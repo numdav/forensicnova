@@ -130,6 +130,7 @@ project = ${FORENSICNOVA_PROJECT}
 dfir_user = ${FORENSICNOVA_DFIR_USER}
 
 [keystone_authtoken]
+www_authenticate_uri = http://${HOST_IP}/identity
 auth_url = http://${HOST_IP}/identity
 auth_type = password
 project_domain_id = default
@@ -137,6 +138,8 @@ user_domain_id = default
 project_name = admin
 username = admin
 password = ${ADMIN_PASSWORD}
+delay_auth_decision = true
+interface = public
 
 [libvirt]
 uri = qemu:///system
