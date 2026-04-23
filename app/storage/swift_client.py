@@ -1,54 +1,44 @@
 """ForensicNova — Swift object storage client with forensic integrity checks.
 
-Responsibilities:
-  1. Authenticate against Keystone as dfir-tester using python-swiftclient.
-  2. Upload a raw memory dump (and later the JSON report) to the 'forensics'
-     Swift container.
-  3. Verify end-to-end integrity via Swift's ETag header:
-       Swift independently computes MD5 of the received bytes and returns it
-       as the ETag in the PUT response.  We compare it against the MD5 we
-       computed locally (from hasher.py) before uploading.
-       Match  → chain-of-custody event "swift_upload_verified" → caller may
-                 invoke secure_delete().
-       Mismatch → chain-of-custody event "swift_upload_integrity_failure"
-                  → local file is preserved for forensic debugging
-                  → IntegrityError raised to alert the operator.
-  4. Attach chain-of-custody metadata to every Swift object as
-     X-Object-Meta-* headers, so the evidence is self-describing even
-     if the JSON report is lost.
+Uses python-swiftclient in the two-step pattern:
+  1. Authenticate against Keystone via swiftclient.client.get_auth() to obtain
+     a (storage_url, auth_token) tuple.
+  2. Upload artifacts with swiftclient.client.put_object(url=..., token=..., ...).
+
+This is the official pattern from the python-swiftclient docs; the earlier
+attempt of passing authurl/user/key directly to put_object() was wrong and
+failed with 'unexpected keyword argument'.
+
+Forensic integrity check (end-to-end):
+  Swift independently computes MD5 of the received bytes and returns it as
+  the ETag header in the PUT response.  We compare it against the MD5 we
+  computed locally with hasher.py.  Match  -> "swift_upload_verified"
+  (caller may secure_delete).  Mismatch -> "swift_upload_integrity_failure"
+  (local file preserved, IntegrityError raised).
 
 Credentials:
-  - Auth URL, username, project, region come from the ForensicNova Config.
-  - Password is NOT stored in the config file (it is sensitive).
-    It is read from the environment variable FORENSICNOVA_DFIR_PASSWORD,
-    which is injected by the systemd unit via the Environment= directive
-    written by plugin.sh.
+  - Auth URL, username, project, region: from the ForensicNova Config.
+  - Password: from environment variable FORENSICNOVA_DFIR_PASSWORD
+    (injected by the systemd unit's Environment= directive written by
+    devstack/plugin.sh).
 
-Simple vs SLO upload:
+Upload strategy:
   - Files < SIMPLE_UPLOAD_THRESHOLD (4 GB): single PUT, ETag = MD5(content).
-  - Files >= threshold: Swift Large Object (SLO), ETag = MD5 of segment ETags.
-    In this case we cannot compare ETag against our full-file MD5 directly;
-    instead we verify each segment's ETag individually and store the full-file
-    MD5 in object metadata for the SIFT workstation to verify post-download.
-    SLO support is scaffolded here but full implementation is deferred to the
-    thesis (guest RAM > 5 GB scenario).
+  - Files >= threshold: Swift Large Object (SLO) — deferred to thesis.
 """
 from __future__ import annotations
 
 import logging
 import os
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import swiftclient
 import swiftclient.exceptions
 
 log = logging.getLogger("forensicnova.storage")
 
-# Files below this threshold use a simple PUT (ETag = full-file MD5).
 SIMPLE_UPLOAD_THRESHOLD = 4 * 1024 ** 3  # 4 GB
-
-# Environment variable that carries the dfir-tester password.
 _PASSWORD_ENV = "FORENSICNOVA_DFIR_PASSWORD"
 
 
@@ -60,6 +50,10 @@ class IntegrityError(RuntimeError):
     """
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def upload_dump(
     local_path: Path,
     object_name: str,
@@ -70,24 +64,8 @@ def upload_dump(
 ) -> dict:
     """Upload a forensic artifact to Swift with integrity verification.
 
-    :param local_path:   Path to the local file to upload (dump or report).
-    :param object_name:  Swift object name, e.g. "dump-<uuid>.raw".
-    :param metadata:     Chain-of-custody fields to attach as X-Object-Meta-*.
-                         Keys must be plain strings (no X-Object-Meta- prefix).
-    :param cfg:          ForensicNova Config instance (from app/config.py).
-    :param password:     dfir-tester password.  If None, read from env var
-                         FORENSICNOVA_DFIR_PASSWORD.
-    :param log_event:    Optional CoC callback(event_type, data).
-
-    :returns: dict with:
-        - swift_object   (str)  — "<container>/<object_name>"
-        - swift_etag     (str)  — ETag returned by Swift
-        - etag_verified  (bool) — True if ETag matched local MD5
-        - size_bytes     (int)  — bytes uploaded
-
-    :raises IntegrityError:       ETag mismatch (do NOT secure_delete).
-    :raises swiftclient.ClientException: Swift/Keystone communication error.
-    :raises EnvironmentError:     password missing from env and argument.
+    :returns: dict with swift_object, swift_etag, etag_verified, size_bytes.
+    :raises  IntegrityError on ETag mismatch (do NOT secure_delete).
     """
     local_path = Path(local_path)
     password = _resolve_password(password)
@@ -111,30 +89,21 @@ def upload_dump(
             "threshold.  SLO support is planned for the thesis milestone."
         )
 
-    os_options = {
-        "project_name":      cfg.forensics_project,
-        "user_domain_id":    "default",
-        "project_domain_id": "default",
-        "region_name":       cfg.keystone_region,
-    }
+    url, token = _authenticate(cfg, password)
 
-    headers = {
-        f"X-Object-Meta-{k}": str(v) for k, v in metadata.items()
-    }
+    _ensure_container(url, token, container)
 
+    headers = {f"X-Object-Meta-{k}": str(v) for k, v in metadata.items()}
     expected_md5 = metadata.get("md5", "")
 
     with local_path.open("rb") as fh:
         swift_etag = swiftclient.client.put_object(
-            authurl=cfg.keystone_auth_url,
-            user=cfg.forensics_dfir_user,
-            key=password,
+            url=url,
+            token=token,
             container=container,
             name=object_name,
             contents=fh,
             content_length=file_size,
-            auth_version="3",
-            os_options=os_options,
             headers=headers,
         )
 
@@ -143,47 +112,20 @@ def upload_dump(
         container, object_name, swift_etag,
     )
 
-    if expected_md5 and swift_etag:
-        etag_clean = swift_etag.strip('"')
-        if etag_clean.lower() == expected_md5.lower():
-            log.info("etag verification OK: %s", etag_clean)
-            _emit(log_event, "swift_upload_verified", {
-                "object_name": object_name,
-                "container": container,
-                "etag": etag_clean,
-                "md5": expected_md5,
-                "size_bytes": file_size,
-            })
-            etag_verified = True
-        else:
-            log.error(
-                "INTEGRITY FAILURE: swift etag=%s != local md5=%s — "
-                "local file preserved, do NOT invoke secure_delete",
-                etag_clean, expected_md5,
-            )
-            _emit(log_event, "swift_upload_integrity_failure", {
-                "object_name": object_name,
-                "container": container,
-                "swift_etag": etag_clean,
-                "local_md5": expected_md5,
-                "size_bytes": file_size,
-            })
-            raise IntegrityError(
-                f"ETag mismatch for {object_name}: "
-                f"swift={etag_clean} local_md5={expected_md5}. "
-                "Local dump preserved. Investigate before proceeding."
-            )
-    else:
-        log.warning(
-            "etag verification skipped: expected_md5=%r swift_etag=%r",
-            expected_md5, swift_etag,
-        )
-        etag_verified = False
+    etag_verified = _verify_etag(
+        swift_etag, expected_md5, object_name, container, file_size, log_event,
+    )
+
+    if etag_verified is False and expected_md5:
+        # _verify_etag raised for True/False mismatch vs match; reaching here
+        # means the integrity check failed.  But _verify_etag already raised
+        # IntegrityError in that case — this branch is defensive only.
+        raise IntegrityError(f"ETag verification failed for {object_name}")
 
     return {
         "swift_object":  f"{container}/{object_name}",
-        "swift_etag":    swift_etag.strip('"'),
-        "etag_verified": etag_verified,
+        "swift_etag":    (swift_etag or "").strip('"'),
+        "etag_verified": bool(etag_verified),
         "size_bytes":    file_size,
     }
 
@@ -195,36 +137,27 @@ def upload_json(
     password: Optional[str] = None,
     log_event: Optional[Callable[[str, dict], None]] = None,
 ) -> dict:
-    """Upload a JSON report (bytes) to Swift.
-
-    No etag verification needed: the report is generated by us,
-    not an evidence artifact.
-
-    :returns: dict with swift_object, swift_etag, size_bytes.
+    """Upload a JSON report (bytes) to Swift.  No etag check required
+    (the report is generated by us, not an evidence artifact).
     """
     password = _resolve_password(password)
     container = cfg.swift_container
 
-    os_options = {
-        "project_name":      cfg.forensics_project,
-        "user_domain_id":    "default",
-        "project_domain_id": "default",
-        "region_name":       cfg.keystone_region,
-    }
+    url, token = _authenticate(cfg, password)
+    _ensure_container(url, token, container)
 
-    log.info("uploading JSON report: %s/%s (%d bytes)",
-             container, object_name, len(json_bytes))
+    log.info(
+        "uploading JSON report: %s/%s (%d bytes)",
+        container, object_name, len(json_bytes),
+    )
 
     swift_etag = swiftclient.client.put_object(
-        authurl=cfg.keystone_auth_url,
-        user=cfg.forensics_dfir_user,
-        key=password,
+        url=url,
+        token=token,
         container=container,
         name=object_name,
         contents=json_bytes,
         content_type="application/json",
-        auth_version="3",
-        os_options=os_options,
     )
 
     _emit(log_event, "swift_report_uploaded", {
@@ -235,7 +168,7 @@ def upload_json(
 
     return {
         "swift_object": f"{container}/{object_name}",
-        "swift_etag":   swift_etag.strip('"'),
+        "swift_etag":   (swift_etag or "").strip('"'),
         "size_bytes":   len(json_bytes),
     }
 
@@ -243,6 +176,104 @@ def upload_json(
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _authenticate(cfg, password: str) -> Tuple[str, str]:
+    """Authenticate to Keystone v3 and return (storage_url, token).
+
+    python-swiftclient's get_auth() handles Keystone v3 when auth_version='3'
+    and os_options provide the required domain IDs.
+    """
+    os_options = {
+        "project_name":      cfg.forensics_project,
+        "user_domain_id":    "default",
+        "project_domain_id": "default",
+        "region_name":       cfg.keystone_region,
+    }
+
+    log.debug(
+        "authenticating to keystone: url=%s user=%s project=%s",
+        cfg.keystone_auth_url, cfg.forensics_dfir_user, cfg.forensics_project,
+    )
+
+    storage_url, token = swiftclient.client.get_auth(
+        auth_url=cfg.keystone_auth_url,
+        user=cfg.forensics_dfir_user,
+        key=password,
+        auth_version="3",
+        os_options=os_options,
+    )
+    log.info("keystone auth OK, storage_url=%s", storage_url)
+    return storage_url, token
+
+
+def _ensure_container(url: str, token: str, container: str) -> None:
+    """PUT the container idempotently.  Swift returns 2xx on both create
+    and 'already exists', so we always issue the call — cheap and safe.
+    The plugin already creates the container at stack time via the admin
+    client, so this is a belt-and-suspenders guarantee for ad-hoc tests.
+    """
+    try:
+        swiftclient.client.put_container(url=url, token=token, container=container)
+        log.debug("container ensured: %s", container)
+    except swiftclient.exceptions.ClientException as exc:
+        # 202 Accepted = already exists, treat as success.
+        if getattr(exc, "http_status", None) in (202, 204):
+            log.debug("container already exists: %s", container)
+            return
+        raise
+
+
+def _verify_etag(
+    swift_etag: Optional[str],
+    expected_md5: str,
+    object_name: str,
+    container: str,
+    file_size: int,
+    log_event: Optional[Callable[[str, dict], None]],
+) -> bool:
+    """Compare Swift ETag against the locally computed MD5.
+
+    :returns: True  if match,
+              False if no md5 provided (skip check),
+              raises IntegrityError on mismatch.
+    """
+    if not expected_md5 or not swift_etag:
+        log.warning(
+            "etag verification skipped: expected_md5=%r swift_etag=%r",
+            expected_md5, swift_etag,
+        )
+        return False
+
+    etag_clean = swift_etag.strip('"')
+    if etag_clean.lower() == expected_md5.lower():
+        log.info("etag verification OK: %s", etag_clean)
+        _emit(log_event, "swift_upload_verified", {
+            "object_name": object_name,
+            "container": container,
+            "etag": etag_clean,
+            "md5": expected_md5,
+            "size_bytes": file_size,
+        })
+        return True
+
+    log.error(
+        "INTEGRITY FAILURE: swift etag=%s != local md5=%s — "
+        "local file preserved, do NOT invoke secure_delete",
+        etag_clean, expected_md5,
+    )
+    _emit(log_event, "swift_upload_integrity_failure", {
+        "object_name": object_name,
+        "container": container,
+        "swift_etag": etag_clean,
+        "local_md5": expected_md5,
+        "size_bytes": file_size,
+    })
+    raise IntegrityError(
+        f"ETag mismatch for {object_name}: "
+        f"swift={etag_clean} local_md5={expected_md5}. "
+        "Local dump preserved. Investigate before proceeding."
+    )
+
 
 def _resolve_password(password: Optional[str]) -> str:
     """Return password from argument or environment variable."""
