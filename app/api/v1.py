@@ -4,33 +4,27 @@ Mounted at /api/v1 by the application factory (app/__init__.py).
 
 Authentication contract:
   - keystonemiddleware (wired in app/__init__.py with delay_auth_decision=True)
-    has already attempted to validate any X-Auth-Token in the incoming request.
-  - It exposes the result via WSGI environ keys:
-        HTTP_X_IDENTITY_STATUS  in {"Confirmed", "Invalid", missing}
-        HTTP_X_USER_NAME        Keystone username (when Confirmed)
-        HTTP_X_ROLES            comma-separated list of role names
+    populates request.environ['HTTP_X_*'] with the validated identity.
   - The before_request hook enforces:
-        IDENTITY_STATUS == "Confirmed"        else 401
-        "forensic_analyst" in X_ROLES         else 403
+        IDENTITY_STATUS == "Confirmed"    else 401
+        "forensic_analyst" in X_ROLES     else 403
 
-Pipeline ordering (FASE 4, final):
+Pipeline ordering (FASE 4 final):
   1. acquire_memory         (libvirt dump, chown, staging)
   2. compute_hashes         (MD5 + SHA1 streaming)
-  3. upload_dump            (Swift PUT + etag verification)
-  4. secure_delete          (shred -u local dump; only if etag verified)
-  5. nova_metadata.collect  (Nova + Glance + libvirt XML, hypervisor-side only)
-  6. generate_report        (all CoC events captured including delete)
+  3. nova_metadata.collect  (Nova + Glance + libvirt XML — drives VM-naming)
+  4. upload_dump            (Swift PUT + etag verification)
+  5. secure_delete          (shred -u local dump; only if etag verified)
+  6. generate_report        (full CoC + self-referencing report.swift_object)
   7. upload_json            (report as second Swift object)
 
-Design note — forensic safety of target_system enrichment:
-  nova_metadata.collect() is invoked ONLY after the dump is already safely
-  on Swift.  Even if the Nova/Glance/libvirt queries fail, the acquisition
-  is considered successful and the report is still produced with the
-  metadata fields set to None.  Enrichment MUST NEVER read from the guest.
+Object naming: dump-<sanitized_vm>-<YYYYMMDDTHHMMSSZ>.raw
+               report-<sanitized_vm>-<YYYYMMDDTHHMMSSZ>.json
 """
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -52,14 +46,15 @@ log = logging.getLogger("forensicnova.api.v1")
 
 api_v1_bp = Blueprint("api_v1", __name__)
 
+_VM_NAME_MAX_LEN = 64
+
 
 # ---------------------------------------------------------------------------
-# Authentication / authorisation gate
+# Auth gate
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.before_request
 def require_forensic_analyst():
-    """Enforce Keystone token + forensic_analyst role on all v1 endpoints."""
     status = request.environ.get("HTTP_X_IDENTITY_STATUS")
     if status != "Confirmed":
         log.warning("auth rejected: identity_status=%r", status)
@@ -91,13 +86,13 @@ def require_forensic_analyst():
     methods=["POST"],
 )
 def memory_acquire(instance_id: str):
-    """Acquire RAM of a Nova instance, hash, upload to Swift, return report."""
     cfg = current_app.config["FORENSICNOVA"]
     tool_version = current_app.config["VERSION"]
     operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
 
     acquisition_id = str(uuid.uuid4())
     started_at = _utc_now_iso()
+    timestamp_compact = _utc_now_compact()
 
     coc = ChainOfCustody(
         acquisition_id=acquisition_id,
@@ -126,15 +121,33 @@ def memory_acquire(instance_id: str):
         )
         domain_name = _lookup_domain_name(cfg.libvirt_uri, instance_id)
 
-        # 2. Hash the dump (streaming MD5 + SHA1)
+        # 2. Hash dump (streaming MD5 + SHA1)
         hash_result = compute_hashes(dump_path, log_event=coc.log_event)
 
-        # 3. Upload dump to Swift with etag verification
-        swift_object_name = f"dump-{acquisition_id}.raw"
+        # 3. Collect OpenStack-side metadata (provides VM name for naming)
+        target_system = nova_metadata.collect(
+            instance_id=instance_id,
+            domain_name=domain_name,
+            libvirt_uri=cfg.libvirt_uri,
+            cfg=cfg,
+        )
+
+        vm_name_raw = (
+            (target_system.get("nova") or {}).get("name")
+            or domain_name
+            or "unknown"
+        )
+        vm_name_safe = _sanitize_vm_name(vm_name_raw)
+
+        swift_object_name  = f"dump-{vm_name_safe}-{timestamp_compact}.raw"
+        report_object_name = f"report-{vm_name_safe}-{timestamp_compact}.json"
+
+        # 4. Upload dump to Swift with etag verification
         swift_metadata = {
             "acquisition_id": acquisition_id,
             "operator":       operator,
             "instance_id":    instance_id,
+            "instance_name":  vm_name_raw,
             "domain_name":    domain_name,
             "md5":            hash_result["md5"],
             "sha1":           hash_result["sha1"],
@@ -149,7 +162,7 @@ def memory_acquire(instance_id: str):
             log_event=coc.log_event,
         )
 
-        # 4. Secure-delete local dump — ONLY if etag verified.
+        # 5. Secure-delete local dump — ONLY if etag verified.
         if swift_result["etag_verified"]:
             secure_delete(dump_path)
             coc.log_event("local_dump_secure_deleted", {
@@ -164,22 +177,13 @@ def memory_acquire(instance_id: str):
                 "reason": "etag_not_verified",
             })
 
-        # 5. Collect OpenStack-side metadata for target_system block.
-        #    Never raises — returns dict with None-filled fields on failure.
-        target_system = nova_metadata.collect(
-            instance_id=instance_id,
-            domain_name=domain_name,
-            libvirt_uri=cfg.libvirt_uri,
-            cfg=cfg,
-        )
-
-        # 6. Generate JSON report (captures full CoC trail through step 4).
+        # 6. Generate JSON report (with self-referencing report block)
         completed_at = _utc_now_iso()
         report = generate_report(
             acquisition_id=acquisition_id,
             operator=operator,
             instance_id=instance_id,
-            instance_name=(target_system.get("nova", {}) or {}).get("name") or domain_name,
+            instance_name=vm_name_raw,
             domain_name=domain_name,
             hash_result=hash_result,
             swift_result=swift_result,
@@ -187,12 +191,13 @@ def memory_acquire(instance_id: str):
             timestamp=completed_at,
             started_at=started_at,
             target_system=target_system,
+            report_object_name=report_object_name,
+            container=cfg.swift_container,
             events=list(coc.events),
         )
         report_bytes = serialize_report(report)
-        report_object_name = f"report-{acquisition_id}.json"
 
-        # 7. Upload report to Swift.
+        # 7. Upload report
         report_swift_result = upload_json(
             json_bytes=report_bytes,
             object_name=report_object_name,
@@ -200,15 +205,15 @@ def memory_acquire(instance_id: str):
             log_event=coc.log_event,
         )
 
-        # 8. Respond with summary
         log.info(
-            "memory_acquire DONE: acq_id=%s size=%d md5=%s",
-            acquisition_id, hash_result["size_bytes"], hash_result["md5"],
+            "memory_acquire DONE: acq_id=%s vm=%s size=%d md5=%s",
+            acquisition_id, vm_name_raw, hash_result["size_bytes"], hash_result["md5"],
         )
         return jsonify({
             "acquisition_id":      acquisition_id,
             "status":              "completed",
             "instance_id":         instance_id,
+            "instance_name":       vm_name_raw,
             "domain_name":         domain_name,
             "operator":            operator,
             "started_at":          started_at,
@@ -276,7 +281,6 @@ def memory_acquire(instance_id: str):
 # ---------------------------------------------------------------------------
 
 def _lookup_domain_name(libvirt_uri: str, instance_id: str) -> str:
-    """Resolve Nova instance UUID to libvirt domain name."""
     conn = libvirt.open(libvirt_uri)
     try:
         return conn.lookupByUUIDString(instance_id).name()
@@ -285,5 +289,15 @@ def _lookup_domain_name(libvirt_uri: str, instance_id: str) -> str:
 
 
 def _utc_now_iso() -> str:
-    """ISO-8601 UTC timestamp with microsecond precision and 'Z' suffix."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _utc_now_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _sanitize_vm_name(name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9-]", "_", name or "")
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_-")
+    cleaned = cleaned[:_VM_NAME_MAX_LEN]
+    return cleaned or "unknown"

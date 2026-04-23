@@ -13,51 +13,40 @@ Schema v1.1 (FASE 4 final):
     "tool":           {"name": "ForensicNova", "version": "0.1.0"},
 
     "timestamps": {
-        "started_at":       "ISO-8601 UTC",   # api_request_received
-        "completed_at":     "ISO-8601 UTC",   # report-generation instant
+        "started_at":       "ISO-8601 UTC",
+        "completed_at":     "ISO-8601 UTC",
         "duration_seconds": 7.12
     },
 
     "instance": {"id": "...", "name": "...", "domain": "instance-xxxx"},
 
-    "target_system": {                         # NEW in v1.1
-        "nova":       {...},                   # Nova server info
-        "flavor":     {...},                   # ram/vcpu/disk
-        "glance":     {...},                   # image + os_type/os_distro
+    "target_system": {
+        "nova":       {...},
+        "flavor":     {...},
+        "glance":     {...},
         "hypervisor": {"type": "kvm"},
-        "libvirt":    {...}                    # arch + memory + cpu_mode
+        "libvirt":    {...}
     },
-    # Used downstream by Volatility 3 to hint at the right ISF/profile.
-    # NEVER populated by reading from the guest — all fields are
-    # OpenStack-side facts (Nova/Glance) or hypervisor-side facts (libvirt
-    # domain XML).  Forensic integrity of the guest is preserved.
 
     "dump": {
         "size_bytes": ..., "md5": "...", "sha1": "...",
-        "swift_object": "...", "swift_etag": "...",
+        "swift_object": "forensics/dump-<vm>-<ts>.raw",
+        "swift_etag": "...",
         "etag_verified": true,
         "format": "raw", "acquisition_method": "libvirt-coreDumpWithFormat"
     },
 
-    "chain_of_custody": {                      # NEW structure in v1.1
+    "report": {
+        "swift_object": "forensics/report-<vm>-<ts>.json",
+        "filename":     "report-<vm>-<ts>.json"
+    },
+
+    "chain_of_custody": {
         "total_events": 11,
-        "events": [
-            {"seq": 1, "event_type": "...", "description": "...",
-             "timestamp": "...", "data": {...}},
-            ...
-        ]
+        "events": [{"seq": 1, "event_type": "...", "description": "...",
+                    "timestamp": "...", "data": {...}}, ...]
     }
   }
-
-Schema v1.0 -> v1.1 migration notes:
-  - chain_of_custody was a bare list; now a dict with total_events + events.
-    Each event gains seq (1-based) and description (human-readable).
-  - timestamps promoted to top-level block with started_at/completed_at/duration.
-  - target_system is a new top-level block.
-
-All added fields are additive — SIFT-side parsers that only read known
-v1.0 keys still work.  Schema version is bumped to 1.1 so strict
-consumers can branch on it.
 """
 from __future__ import annotations
 
@@ -69,9 +58,6 @@ log = logging.getLogger("forensicnova.reports.json")
 
 SCHEMA_VERSION = "1.1"
 
-# Human-readable descriptions for every CoC event type we emit.
-# Kept here (not in chain_of_custody.py) because it's a reporting concern,
-# not a recording concern — the JSONL audit log remains schema-minimal.
 _EVENT_DESCRIPTIONS = {
     "api_request_received":           "REST endpoint received the acquisition request",
     "acquisition_initiated":          "Acquisition pipeline started — instance identified",
@@ -100,16 +86,26 @@ def generate_report(
     hash_result: dict,
     swift_result: dict,
     tool_version: str,
-    timestamp: str,                         # completed_at (current UTC)
-    started_at: Optional[str] = None,       # api_request_received timestamp
-    target_system: Optional[dict] = None,   # nova_metadata.collect() output
+    timestamp: str,
+    started_at: Optional[str] = None,
+    target_system: Optional[dict] = None,
+    report_object_name: Optional[str] = None,
+    container: str = "forensics",
     events: Optional[list[dict]] = None,
     acquisition_method: str = "libvirt-coreDumpWithFormat",
 ) -> dict:
-    """Assemble the structured forensic report (schema v1.1)."""
-    duration = _compute_duration(started_at, timestamp)
+    """Assemble the structured forensic report (schema v1.1).
 
+    :param report_object_name: The Swift object name under which this report
+                               will be uploaded (e.g. 'report-vm-ts.json').
+                               Embedded in the report itself for self-reference
+                               so analysts can cross-reference dump ↔ report.
+    :param container:          Swift container (default 'forensics').
+    """
+    duration = _compute_duration(started_at, timestamp)
     coc_events = _enrich_events(events or [])
+
+    report_block = _build_report_block(report_object_name, container)
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -146,6 +142,7 @@ def generate_report(
             "format":             "raw",
             "acquisition_method": acquisition_method,
         },
+        "report": report_block,
         "chain_of_custody": {
             "total_events": len(coc_events),
             "events":       coc_events,
@@ -153,9 +150,10 @@ def generate_report(
     }
 
     log.info(
-        "report generated: acq=%s, instance=%s, dump=%s, events=%d, duration=%ss",
+        "report generated: acq=%s, instance=%s, dump=%s, report=%s, events=%d",
         acquisition_id, instance_id,
-        swift_result.get("swift_object"), len(coc_events), duration,
+        swift_result.get("swift_object"), report_block.get("swift_object"),
+        len(coc_events),
     )
     return report
 
@@ -169,6 +167,16 @@ def serialize_report(report: dict) -> bytes:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _build_report_block(report_object_name: Optional[str], container: str) -> dict:
+    """Self-reference block so the report knows its own Swift coordinates."""
+    if not report_object_name:
+        return {"swift_object": None, "filename": None}
+    return {
+        "swift_object": f"{container}/{report_object_name}",
+        "filename":     report_object_name,
+    }
+
 
 def _enrich_events(events: list[dict]) -> list[dict]:
     """Add 1-based seq and human-readable description to each CoC event."""
@@ -188,11 +196,7 @@ def _enrich_events(events: list[dict]) -> list[dict]:
 
 
 def _compute_duration(started_at: Optional[str], completed_at: str) -> Optional[float]:
-    """Parse two ISO-8601 UTC strings and return duration in seconds.
-
-    Robust to the 'Z' suffix we use (no native datetime parser for 'Z').
-    Returns None on parse failure so the report is never blocked.
-    """
+    """Parse two ISO-8601 UTC strings and return duration in seconds."""
     if not started_at:
         return None
     try:
@@ -207,7 +211,5 @@ def _compute_duration(started_at: Optional[str], completed_at: str) -> Optional[
 
 def _parse_iso_utc(s: str) -> datetime:
     """Parse 'YYYY-MM-DDTHH:MM:SS.ffffffZ' into a datetime."""
-    # datetime.fromisoformat in Python 3.11+ accepts 'Z'; for robustness
-    # we normalise to '+00:00' explicitly.
     normalised = s.replace("Z", "+00:00")
     return datetime.fromisoformat(normalised)
