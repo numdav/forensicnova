@@ -19,17 +19,26 @@ Design rationale:
    - Dual sink: rotating file in cfg.log_dir AND stderr (journald captures
      stderr automatically when running under systemd).
 
-4. Authentication (FASE 4)
-   - keystonemiddleware.auth_token is wired around app.wsgi_app.
+4. Authentication — Keystone middleware wiring (per official docs)
+   - https://docs.openstack.org/keystonemiddleware/latest/middlewarearchitecture.html
+   - AuthProtocol does NOT accept auth parameters as a raw dict.
+     The supported patterns are:
+        (a) paste-deploy pipeline with [keystone_authtoken] in an INI file
+            loaded globally by oslo.config.
+        (b) programmatic: build an oslo_config.cfg.ConfigOpts, register the
+            middleware options on it, load the INI file, then pass it as
+            {"oslo_config_config": CONF} to AuthProtocol.
+     We use pattern (b) because ForensicNova is a standalone Flask app,
+     not a paste-deploy pipeline like legacy Nova/Swift.
    - delay_auth_decision=True: the middleware never rejects a request on
-     its own; it only POPULATES request.environ['HTTP_X_*'] with the
+     its own; it only populates request.environ['HTTP_X_*'] with the
      validated identity (or marks it 'Invalid'/missing).  Each blueprint
      decides whether to enforce auth via its own before_request hook.
      This is what keeps /health unauthenticated while /api/v1/* is locked.
    - The middleware itself authenticates as a service user (admin) with
      enough privilege to validate arbitrary tokens against Keystone.
-     User credentials come from the [keystone_authtoken] section of
-     forensicnova.conf, written by devstack/plugin.sh.
+     Credentials live in [keystone_authtoken] inside
+     /etc/forensicnova/forensicnova.conf, written by devstack/plugin.sh.
 """
 from __future__ import annotations
 
@@ -82,26 +91,69 @@ def _configure_logging(app: Flask, cfg: Config) -> None:
     app.logger.setLevel(logging.INFO)
 
 
+def _build_oslo_conf(cfg: Config):
+    """Build an oslo.config ConfigOpts for keystonemiddleware.
+
+    Registers the subset of [keystone_authtoken] options we actually use
+    (the middleware itself would register many more via list_auth_token_opts,
+    but the minimal set below is sufficient for validating tokens against
+    Keystone in password auth mode).
+
+    Returns the loaded CONF object, or None if registration/loading fails.
+    """
+    from oslo_config import cfg as oslo_cfg
+
+    CONF = oslo_cfg.ConfigOpts()
+
+    # Options documented at:
+    # https://docs.openstack.org/keystonemiddleware/latest/middlewarearchitecture.html
+    authtoken_opts = [
+        oslo_cfg.StrOpt("auth_type"),
+        oslo_cfg.StrOpt("auth_url"),
+        oslo_cfg.StrOpt("username"),
+        oslo_cfg.StrOpt("password", secret=True),
+        oslo_cfg.StrOpt("project_name"),
+        oslo_cfg.StrOpt("user_domain_id"),
+        oslo_cfg.StrOpt("project_domain_id"),
+        oslo_cfg.BoolOpt("delay_auth_decision", default=False),
+        oslo_cfg.IntOpt("token_cache_time", default=300),
+    ]
+    CONF.register_opts(authtoken_opts, group="keystone_authtoken")
+
+    # Load the ForensicNova INI file (same one that populated cfg).
+    # oslo.config reads values by section/key; our file already has the
+    # correct [keystone_authtoken] section written by plugin.sh.
+    CONF(
+        args=[],
+        default_config_files=[cfg.config_path],
+        project="forensicnova",
+        validate_default_values=True,
+    )
+
+    # Force delay_auth_decision=True regardless of file setting.
+    # This is ForensicNova policy: /health must stay unauthenticated, and
+    # we enforce auth per-blueprint in before_request hooks.
+    CONF.set_override("delay_auth_decision", True, group="keystone_authtoken")
+
+    return CONF
+
+
 def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
     """Wrap app.wsgi_app with keystonemiddleware.auth_token.
 
-    delay_auth_decision=True — never reject on its own, just populate
-    HTTP_X_* environ keys.  Per-blueprint before_request hooks enforce
-    the actual access policy.
-
-    If [keystone_authtoken] is not fully configured, we skip wiring and
-    log a clear warning.  In that case /api/v1/* will return 401 because
-    HTTP_X_IDENTITY_STATUS will never be 'Confirmed' — safe default.
+    Pattern (b) from the module docstring: pass an oslo.config ConfigOpts
+    via {"oslo_config_config": CONF} so the middleware reads all its
+    parameters from the same INI file as the rest of ForensicNova.
     """
     missing = []
-    if not cfg.keystone_auth_url:
-        missing.append("keystone.auth_url")
     if not cfg.keystone_authtoken_username:
         missing.append("keystone_authtoken.username")
     if not cfg.keystone_authtoken_password:
         missing.append("keystone_authtoken.password")
     if not cfg.keystone_authtoken_project:
         missing.append("keystone_authtoken.project_name")
+    if not cfg.keystone_auth_url:
+        missing.append("keystone.auth_url")
 
     if missing:
         app.logger.warning(
@@ -118,20 +170,21 @@ def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
         )
         return
 
-    auth_conf = {
-        "auth_type":           "password",
-        "auth_url":            cfg.keystone_auth_url,
-        "username":            cfg.keystone_authtoken_username,
-        "password":            cfg.keystone_authtoken_password,
-        "project_name":        cfg.keystone_authtoken_project,
-        "user_domain_id":      "default",
-        "project_domain_id":   "default",
-        "delay_auth_decision": True,
-        # Cache token validations in memory for 5 min — reduces load on
-        # Keystone when the same operator makes multiple requests.
-        "token_cache_time":    300,
+    try:
+        CONF = _build_oslo_conf(cfg)
+    except Exception as exc:  # noqa: BLE001 — log and bail out
+        app.logger.error(
+            "failed to build oslo.config for auth_token: %s — auth disabled",
+            exc,
+        )
+        return
+
+    # The only keys AuthProtocol accepts in its dict are operational hints;
+    # actual parameters come from CONF.
+    middleware_conf = {
+        "oslo_config_config": CONF,
     }
-    app.wsgi_app = auth_token.AuthProtocol(app.wsgi_app, auth_conf)
+    app.wsgi_app = auth_token.AuthProtocol(app.wsgi_app, middleware_conf)
     app.logger.info(
         "keystonemiddleware wired (service_user=%s, delay_auth_decision=True)",
         cfg.keystone_authtoken_username,
