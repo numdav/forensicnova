@@ -82,7 +82,7 @@ forensicnova_ensure_identity() {
                 continue
                 ;;
         esac
-        get_or_add_user_project_role "reader" \
+        get_or_add_user_project_role "admin" \
             "$FORENSICNOVA_DFIR_USER" "$project" || \
             forensicnova_log "extra" \
                 "WARNING: could not add reader role on project '$project' (non-fatal)"
