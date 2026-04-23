@@ -68,6 +68,8 @@ forensicnova_ensure_identity() {
         "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
     get_or_add_user_project_role "member" \
         "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
+    get_or_add_user_project_role "admin" \
+        "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
 
     # Cross-tenant reader role: grant 'reader' on every existing project
     # so dfir-tester can query Nova/Glance metadata for any VM regardless
