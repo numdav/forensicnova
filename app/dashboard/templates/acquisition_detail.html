@@ -16,8 +16,8 @@
             &larr; Back to acquisitions
         </a>
 
-        <div class="mt-2 d-flex align-items-center gap-3">
-            <span class="text-body-secondary fs-5">Target:</span>
+        <div class="mt-2 d-flex align-items-baseline gap-3">
+            <span class="fs-3 text-body">Target:</span>
             <h1 class="mb-0 text-info font-mono fw-semibold">
                 {{ report.instance.name or '(unknown)' }}
             </h1>
@@ -316,18 +316,14 @@
 
             <ul class="list-group list-group-flush">
                 {% for event in report.chain_of_custody.events %}
-                    {# Keyword-based color coding — matches event_type vocabulary
-                       documented in app/reports/json_report.py._EVENT_DESCRIPTIONS. #}
+                    {# Color coding kept minimal: only failures stand out.
+                       The narrative flow is already carried by seq numbers
+                       and timestamps; aggressive coloring on 'completed'
+                       events would flood the eye with green noise. #}
                     {% set ev = event.event_type or '' %}
                     {% if 'failed' in ev or 'integrity_failure' in ev %}
                         {% set accent_class = 'text-danger fw-semibold' %}
                         {% set left_border = 'border-start border-3 border-danger' %}
-                    {% elif 'preserved' in ev %}
-                        {% set accent_class = 'text-warning fw-semibold' %}
-                        {% set left_border = 'border-start border-3 border-warning' %}
-                    {% elif 'verified' in ev or 'completed' in ev or 'secure_deleted' in ev %}
-                        {% set accent_class = 'text-success' %}
-                        {% set left_border = 'border-start border-3 border-success' %}
                     {% else %}
                         {% set accent_class = 'text-body' %}
                         {% set left_border = 'border-start border-3 border-secondary' %}
