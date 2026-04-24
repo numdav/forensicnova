@@ -11,6 +11,7 @@ Authentication contract:
 
 Endpoints:
   POST /servers/<instance_id>/memory_acquire   — trigger acquisition pipeline
+  GET  /servers/                               — list all Nova instances (FASE 5)
   GET  /acquisitions/                          — list all acquisitions (summary)
   GET  /acquisitions/<acquisition_id>          — full report for one acquisition
 
@@ -286,6 +287,38 @@ def memory_acquire(instance_id: str):
 
 
 # ---------------------------------------------------------------------------
+# GET /servers/   — list Nova instances (FASE 5 step 2e)
+# ---------------------------------------------------------------------------
+
+@api_v1_bp.route("/servers/", methods=["GET"])
+def list_servers():
+    """Cross-tenant enumeration of Nova instances for the dashboard picker.
+
+    Delegates to nova_metadata.list_all_servers(), which authenticates as
+    dfir-tester (with cross-tenant admin role) and queries Nova with
+    all_tenants=True.  Returns a compact summary list.
+    """
+    cfg = current_app.config["FORENSICNOVA"]
+    operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
+
+    log.info("list_servers: operator=%s", operator)
+
+    try:
+        servers = nova_metadata.list_all_servers(cfg)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("list_all_servers failed")
+        return jsonify(
+            error="nova_list_failed",
+            detail=str(exc),
+        ), 502
+
+    return jsonify({
+        "count":   len(servers),
+        "servers": servers,
+    }), 200
+
+
+# ---------------------------------------------------------------------------
 # GET /acquisitions/   — list summary
 # ---------------------------------------------------------------------------
 
@@ -429,7 +462,7 @@ def _build_summary(report: dict, object_name: str) -> dict:
         "duration_seconds": timestamps.get("duration_seconds"),
         "size_bytes":       dump.get("size_bytes"),
         "md5":              dump.get("md5"),
-        "sha1":             dump.get("sha1"),
+        "sha1":              dump.get("sha1"),
         "etag_verified":    dump.get("etag_verified"),
         "swift_dump":       dump.get("swift_object"),
         "swift_report":     report_blk.get("swift_object"),

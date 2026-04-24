@@ -3,19 +3,13 @@
 Routes:
   GET  /dashboard/                        -> acquisitions list (home)
   GET  /dashboard/acquisitions/<id>       -> single-acquisition detail
+  GET  /dashboard/acquire                 -> render acquisition trigger form
+  POST /dashboard/acquire                 -> trigger acquisition, redirect to detail
   GET  /dashboard/login                   -> render login form
   POST /dashboard/login                   -> validate, auth to Keystone, set session
   GET  /dashboard/logout                  -> revoke token, clear session
 
-Error handling — blueprint-level, centralized:
-  SessionRevokedError  -> clear session + flash + redirect to /login
-  ApiForbiddenError    -> flash + redirect to list (session stays)
-  ApiNotFoundError     -> flash + redirect to list (404 is mild)
-  ApiUnavailableError  -> flash banner + render list with empty data, HTTP 503
-
-The error handlers live on the blueprint, so any view can raise the
-typed exceptions (via api_client) without try/except — Flask routes the
-exception to the right handler automatically.
+Error handling — blueprint-level, centralized.
 """
 from __future__ import annotations
 
@@ -30,15 +24,18 @@ from flask import (
 )
 
 from app.dashboard.api_client import (
+    AcquisitionError,
     ApiForbiddenError,
     ApiNotFoundError,
     ApiUnavailableError,
     SessionRevokedError,
     get_acquisition,
     list_acquisitions,
+    list_servers,
+    trigger_acquisition,
 )
 from app.dashboard.decorators import login_required
-from app.dashboard.forms import LoginForm
+from app.dashboard.forms import AcquireForm, LoginForm
 from app.dashboard.keystone_auth import (
     AuthenticationError,
     authenticate,
@@ -58,7 +55,6 @@ dashboard_bp = Blueprint(
 
 @dashboard_bp.errorhandler(SessionRevokedError)
 def _handle_session_revoked(exc: SessionRevokedError):
-    """Token was rejected mid-session — clear cookie and redirect to login."""
     current_app.logger.info(
         "session revoked mid-request: user=%s",
         session.get("username", "unknown"),
@@ -73,7 +69,6 @@ def _handle_session_revoked(exc: SessionRevokedError):
 
 @dashboard_bp.errorhandler(ApiForbiddenError)
 def _handle_api_forbidden(exc: ApiForbiddenError):
-    """Role was removed mid-session — session is still valid, just powerless."""
     current_app.logger.info(
         "api forbidden mid-request: user=%s",
         session.get("username", "unknown"),
@@ -88,7 +83,6 @@ def _handle_api_forbidden(exc: ApiForbiddenError):
 
 @dashboard_bp.errorhandler(ApiNotFoundError)
 def _handle_api_not_found(exc: ApiNotFoundError):
-    """Resource is gone (typo in URL or deleted after listing)."""
     current_app.logger.info("api 404: %s", exc)
     flash(
         "The requested acquisition was not found. It may have been "
@@ -98,17 +92,27 @@ def _handle_api_not_found(exc: ApiNotFoundError):
     return redirect(url_for("dashboard.acquisitions_list"))
 
 
+@dashboard_bp.errorhandler(AcquisitionError)
+def _handle_acquisition_failed(exc: AcquisitionError):
+    """Pipeline rejected the acquisition (libvirt error, integrity, etc.)."""
+    current_app.logger.error("acquisition failed: %s | detail=%s", exc, exc.detail)
+    detail_reason = exc.detail.get("error", "unknown_error")
+    flash(
+        f"Acquisition failed: {exc} (reason: {detail_reason}). "
+        "See service logs for full diagnostic output.",
+        "danger",
+    )
+    return redirect(url_for("dashboard.acquire"))
+
+
 @dashboard_bp.errorhandler(ApiUnavailableError)
 def _handle_api_unavailable(exc: ApiUnavailableError):
-    """Loopback API is down — render the page frame with empty data."""
     current_app.logger.error("api unavailable: %s", exc)
     flash(
         "The forensic API is temporarily unavailable. "
         "Try again in a moment.",
         "danger",
     )
-    # Keep the UI shell usable — the navbar and logout still work,
-    # only the data section renders empty.
     return render_template(
         "acquisitions_list.html",
         acquisitions=[],
@@ -124,11 +128,6 @@ def _handle_api_unavailable(exc: ApiUnavailableError):
 @dashboard_bp.route("/")
 @login_required
 def acquisitions_list():
-    """Home — table of all acquisitions.
-
-    Feeds from GET /api/v1/acquisitions/ via the loopback client.
-    Exceptions propagate to the blueprint errorhandlers — no try/except.
-    """
     result = list_acquisitions()
     return render_template(
         "acquisitions_list.html",
@@ -139,20 +138,96 @@ def acquisitions_list():
 
 
 # ---------------------------------------------------------------------------
-# GET /dashboard/acquisitions/<id>   — single-acquisition detail
+# GET /dashboard/acquisitions/<id>
 # ---------------------------------------------------------------------------
 
 @dashboard_bp.route("/acquisitions/<acquisition_id>")
 @login_required
 def acquisition_detail(acquisition_id: str):
-    """Detail page for a single acquisition.
-
-    Feeds from GET /api/v1/acquisitions/<id> via the loopback client.
-    Full schema v1.1 is passed to the template; Jinja2 handles the
-    heavy rendering work (case info, target system, CoC timeline).
-    """
     report = get_acquisition(acquisition_id)
     return render_template("acquisition_detail.html", report=report)
+
+
+# ---------------------------------------------------------------------------
+# GET  /dashboard/acquire   — render the trigger form
+# POST /dashboard/acquire   — fire the acquisition
+# ---------------------------------------------------------------------------
+
+@dashboard_bp.route("/acquire", methods=["GET", "POST"])
+@login_required
+def acquire():
+    """Trigger a new acquisition: pick a VM, confirm, wait for completion."""
+    # Fetch the fresh server list and build form choices.
+    servers_resp = list_servers()
+    servers = servers_resp.get("servers", [])
+
+    # Keep ACTIVE at top of the dropdown, others below.  SelectField
+    # choices: list of (value, label) tuples.  We encode (status, ram_mb)
+    # into the label so the template can split on ' | ' and style per-option.
+    active   = [s for s in servers if s.get("status") == "ACTIVE"]
+    inactive = [s for s in servers if s.get("status") != "ACTIVE"]
+
+    def _label(s: dict) -> str:
+        return "{name} | project:{proj} | {ram} MB | {status}".format(
+            name=s.get("name") or "(unnamed)",
+            proj=(s.get("project_id") or "?")[:8],
+            ram=s.get("ram_mb") if s.get("ram_mb") is not None else "?",
+            status=s.get("status") or "?",
+        )
+
+    choices = [(s["id"], _label(s)) for s in active + inactive]
+
+    form = AcquireForm()
+    form.instance_id.choices = choices
+
+    if form.validate_on_submit():
+        target_id = form.instance_id.data
+
+        # Hard guard: refuse to submit non-ACTIVE VMs even if the client
+        # tampered with the form to send a disabled option value.  libvirt
+        # coreDump fails on shutoff VMs — we fail fast with a meaningful
+        # message instead of waiting for the pipeline to blow up.
+        picked = next((s for s in servers if s["id"] == target_id), None)
+        if not picked:
+            flash("Selected VM is no longer present. Refresh the list.", "warning")
+            return redirect(url_for("dashboard.acquire"))
+        if picked.get("status") != "ACTIVE":
+            flash(
+                f"Cannot acquire RAM from '{picked.get('name')}' — "
+                f"VM status is {picked.get('status')}, must be ACTIVE.",
+                "warning",
+            )
+            return redirect(url_for("dashboard.acquire"))
+
+        current_app.logger.info(
+            "dashboard acquire: user=%s target=%s (%s)",
+            session.get("username", "unknown"),
+            target_id, picked.get("name"),
+        )
+
+        # Blocks until the pipeline completes (see api_client timeouts).
+        # Exceptions propagate to the blueprint errorhandlers.
+        result = trigger_acquisition(target_id)
+
+        acq_id = result.get("acquisition_id")
+        vm_name = result.get("instance_name") or picked.get("name")
+        size_mb = (result.get("size_bytes") or 0) / 1024 / 1024
+        flash(
+            f"Acquisition completed for {vm_name}: "
+            f"{size_mb:.1f} MB, MD5 {result.get('md5', '?')[:12]}… "
+            f"(integrity: {'verified' if result.get('etag_verified') else 'FAILED'}).",
+            "success",
+        )
+        return redirect(url_for("dashboard.acquisition_detail", acquisition_id=acq_id))
+
+    # GET or failed POST validation
+    return render_template(
+        "acquire_form.html",
+        form=form,
+        servers=servers,
+        active_count=len(active),
+        total_count=len(servers),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +237,6 @@ def acquisition_detail(acquisition_id: str):
 
 @dashboard_bp.route("/login", methods=["GET", "POST"])
 def login():
-    """Render login form on GET; validate and issue a session on POST."""
-    # Already logged in? Redirect to home instead of showing login again.
     if "keystone_token" in session:
         return redirect(url_for("dashboard.acquisitions_list"))
 
@@ -187,7 +260,7 @@ def login():
             )
             flash(str(exc), "danger")
             return render_template("login.html", form=form)
-        except Exception:  # noqa: BLE001 — belt-and-suspenders
+        except Exception:  # noqa: BLE001
             current_app.logger.exception(
                 "unexpected error during dashboard login",
             )
@@ -198,8 +271,6 @@ def login():
             )
             return render_template("login.html", form=form)
 
-        # Install the session.  .permanent = True activates the 8h
-        # lifetime from PERMANENT_SESSION_LIFETIME.
         session.permanent = True
         session["keystone_token"] = claims["token"]
         session["username"]       = claims["username"]
@@ -225,7 +296,6 @@ def login():
 
 @dashboard_bp.route("/logout")
 def logout():
-    """Revoke the Keystone token server-side and clear the session."""
     token    = session.get("keystone_token")
     username = session.get("username", "unknown")
     cfg      = current_app.config["FORENSICNOVA"]

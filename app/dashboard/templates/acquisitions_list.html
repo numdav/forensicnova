@@ -18,38 +18,29 @@
         </p>
     </div>
 
-    {# Trigger button — disabled until step 2e. #}
-    <span class="d-inline-block"
-          title="On-demand acquisition trigger will arrive in step 2e">
-        <button type="button"
-                class="btn btn-primary disabled"
-                tabindex="-1"
-                aria-disabled="true"
-                style="pointer-events: none;">
-            New acquisition
-        </button>
-    </span>
+    <a href="{{ url_for('dashboard.acquire') }}" class="btn btn-primary">
+        New acquisition
+    </a>
 </div>
 
 {% if count == 0 and not api_down %}
 
-    {# Empty state — first-time-user-ish, point them to the trigger. #}
     <div class="card border-secondary">
         <div class="card-body text-center py-5">
             <p class="lead mb-2 text-body-secondary">
                 No memory acquisitions have been recorded yet.
             </p>
             <p class="small text-body-secondary mb-0">
-                Trigger your first acquisition via
-                <span class="font-mono">POST /api/v1/servers/&lt;id&gt;/memory_acquire</span>
-                or (soon) from the <em>New acquisition</em> button above.
+                Trigger your first acquisition via the
+                <em>New acquisition</em> button above,
+                or programmatically via
+                <span class="font-mono">POST /api/v1/servers/&lt;id&gt;/memory_acquire</span>.
             </p>
         </div>
     </div>
 
 {% elif count == 0 and api_down %}
 
-    {# API down — the flash banner already carried the message; keep it terse. #}
     <div class="card border-danger">
         <div class="card-body text-center py-4">
             <p class="mb-0 text-body-secondary small">

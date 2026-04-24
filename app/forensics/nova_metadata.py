@@ -18,6 +18,11 @@ images carry no os_distro property).  The analyst tool (Volatility 3) will
 still auto-detect OS from the dump; this block is the "best guess hint"
 that comes FROM OpenStack, useful especially for thesis-scope Windows VMs
 where the Glance image typically has os_type=windows / os_distro=win10.
+
+FASE 5 addition — list_all_servers():
+  Cross-tenant enumeration of all Nova instances, used by the dashboard
+  "New acquisition" dropdown.  Requires dfir-tester to have the 'admin'
+  role on every project (granted by devstack/plugin.sh at stack time).
 """
 from __future__ import annotations
 
@@ -85,17 +90,77 @@ def collect(
     return result
 
 
+def list_all_servers(cfg, password: Optional[str] = None) -> list[dict]:
+    """Enumerate all Nova instances visible to dfir-tester, across tenants.
+
+    Used by the dashboard's "New acquisition" form to populate the VM
+    dropdown.  Returns a compact summary per server — enough to decide
+    whether to acquire and to estimate the dump size.
+
+    :returns: list of dicts with keys:
+        id, name, status, project_id, flavor_name, ram_mb,
+        image_name, host, created
+    """
+    from novaclient import client as nova_client
+
+    sess = _build_keystone_session(cfg, password)
+    nova = nova_client.Client("2.1", session=sess)
+
+    # Cache flavors up-front: each server references a flavor_id, and
+    # resolving flavor name + RAM for every server with individual GETs
+    # would be O(N) round-trips.  Fetch the full flavor list once and
+    # build an id -> flavor dict.
+    try:
+        flavors_by_id = {f.id: f for f in nova.flavors.list()}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("flavor list failed, flavor fields will be null: %s", exc)
+        flavors_by_id = {}
+
+    # all_tenants=True requires admin role on the target project (or
+    # a cloud-level 'admin' role).  dfir-tester has 'admin' on every
+    # project thanks to plugin.sh's cross-tenant role grant loop.
+    try:
+        servers = nova.servers.list(search_opts={"all_tenants": True})
+    except Exception as exc:
+        log.exception("nova servers.list failed")
+        raise
+
+    out: list[dict] = []
+    for s in servers:
+        flavor_ref = (s.flavor or {}) if isinstance(s.flavor, dict) else {}
+        flavor_id = flavor_ref.get("id")
+        flavor = flavors_by_id.get(flavor_id) if flavor_id else None
+
+        image_ref = (s.image or {}) if isinstance(s.image, dict) else {}
+        image_id = image_ref.get("id")
+
+        out.append({
+            "id":          s.id,
+            "name":        s.name,
+            "status":      s.status,
+            "project_id":  getattr(s, "tenant_id", None),
+            "flavor_name": flavor.name if flavor else None,
+            "ram_mb":      flavor.ram if flavor else None,
+            "image_id":    image_id,
+            "host":        getattr(s, "OS-EXT-SRV-ATTR:host", None),
+            "created":     getattr(s, "created", None),
+        })
+
+    log.info("list_all_servers: returned %d servers", len(out))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # OpenStack API client
 # ---------------------------------------------------------------------------
 
-def _fetch_openstack_metadata(
-    instance_id: str, cfg, password: Optional[str],
-) -> tuple[dict, dict, dict]:
-    """Call Nova + Glance as dfir-tester and extract useful fields."""
+def _build_keystone_session(cfg, password: Optional[str]):
+    """Build a keystoneauth Session scoped to the forensics project.
+
+    Shared between collect() (single-server metadata) and list_all_servers()
+    (cross-tenant enumeration) — both auth as dfir-tester.
+    """
     from keystoneauth1 import loading, session as ks_session
-    from novaclient import client as nova_client
-    from glanceclient import client as glance_client
 
     pwd = password or os.environ.get("FORENSICNOVA_DFIR_PASSWORD", "")
     if not pwd:
@@ -112,7 +177,17 @@ def _fetch_openstack_metadata(
         user_domain_id="default",
         project_domain_id="default",
     )
-    sess = ks_session.Session(auth=auth)
+    return ks_session.Session(auth=auth)
+
+
+def _fetch_openstack_metadata(
+    instance_id: str, cfg, password: Optional[str],
+) -> tuple[dict, dict, dict]:
+    """Call Nova + Glance as dfir-tester and extract useful fields."""
+    from novaclient import client as nova_client
+    from glanceclient import client as glance_client
+
+    sess = _build_keystone_session(cfg, password)
 
     # Nova: server + flavor
     nova = nova_client.Client("2.1", session=sess)
