@@ -230,8 +230,12 @@
             const modalInstance = bootstrap.Modal.getInstance(modal);
             modalInstance.hide();
             overlay.classList.remove('d-none');
-            // Disable the form to prevent any accidental double-submit.
-            select.disabled = true;
+            // IMPORTANT: do NOT disable the <select> here.  HTML disabled
+            // inputs are excluded from the POST body, which would cause
+            // the server to see instance_id=None and fail WTForms
+            // validation.  The overlay already prevents any further
+            // interaction with the form.  We just guard the open-modal
+            // button against a double click from keyboard repeat.
             openBtn.disabled = true;
             form.submit();
         });
