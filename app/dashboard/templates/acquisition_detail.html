@@ -7,7 +7,7 @@
 {% block content %}
 
 {# --------------------------------------------------------------------- #}
-{#  Header: VM name + integrity badge + back link                         #}
+{#  Header: prominent VM name + integrity badge + back link               #}
 {# --------------------------------------------------------------------- #}
 <div class="d-flex justify-content-between align-items-start mb-4">
     <div>
@@ -15,11 +15,15 @@
            class="text-body-secondary text-decoration-none small">
             &larr; Back to acquisitions
         </a>
-        <h2 class="mb-1 mt-2">
-            <span class="text-body-secondary">Target:</span>
-            <span class="font-mono">{{ report.instance.name or '(unknown)' }}</span>
-        </h2>
-        <div class="small text-body-secondary font-mono">
+
+        <div class="mt-2 d-flex align-items-center gap-3">
+            <span class="text-body-secondary fs-5">Target:</span>
+            <h1 class="mb-0 text-info font-mono fw-semibold">
+                {{ report.instance.name or '(unknown)' }}
+            </h1>
+        </div>
+
+        <div class="small text-body-secondary font-mono mt-2">
             acquisition <span class="text-body">{{ report.acquisition_id }}</span>
         </div>
     </div>
@@ -78,7 +82,10 @@
     </div>
 
     {# ----------------------------------------------------------------- #}
-    {#  Card: Evidence Artifacts                                          #}
+    {#  Card: Evidence                                                    #}
+    {#  - Evidence file name is prominent (SIFT workflow hint).           #}
+    {#  - MD5 / SHA1 shown in neutral text — integrity is already         #}
+    {#    communicated by the badge in the header.                        #}
     {# ----------------------------------------------------------------- #}
     <div class="col-lg-6">
         <div class="card border-secondary h-100">
@@ -86,6 +93,26 @@
                 <strong>Evidence</strong>
             </div>
             <div class="card-body">
+
+                {# Prominent evidence file block — the analyst's landmark
+                   when looking for the dump in SIFT's storage. #}
+                <div class="mb-3 p-3 rounded border border-info-subtle bg-body-tertiary">
+                    <div class="small text-body-secondary mb-1">
+                        EVIDENCE FILE
+                    </div>
+                    <div class="font-mono text-info text-break fw-semibold">
+                        {% set swift_path = report.dump.swift_object or '' %}
+                        {% if '/' in swift_path %}
+                            {{ swift_path.split('/', 1)[1] }}
+                        {% else %}
+                            {{ swift_path or '—' }}
+                        {% endif %}
+                    </div>
+                    <div class="small text-body-secondary mt-1 font-mono">
+                        container: {{ swift_path.split('/', 1)[0] if '/' in swift_path else '—' }}
+                    </div>
+                </div>
+
                 <dl class="row mb-0 small">
                     <dt class="col-5 text-body-secondary">Size</dt>
                     <dd class="col-7 font-mono">
@@ -108,12 +135,12 @@
                     </dd>
 
                     <dt class="col-5 text-body-secondary">MD5</dt>
-                    <dd class="col-7 font-mono text-warning text-break">
+                    <dd class="col-7 font-mono text-break">
                         {{ report.dump.md5 or '—' }}
                     </dd>
 
                     <dt class="col-5 text-body-secondary">SHA-1</dt>
-                    <dd class="col-7 font-mono text-body-secondary text-break">
+                    <dd class="col-7 font-mono text-break">
                         {{ report.dump.sha1 or '—' }}
                     </dd>
 
@@ -122,14 +149,9 @@
                         {{ report.dump.swift_etag or '—' }}
                     </dd>
 
-                    <dt class="col-5 text-body-secondary">Swift (dump)</dt>
-                    <dd class="col-7 font-mono text-break">
-                        {{ report.dump.swift_object or '—' }}
-                    </dd>
-
-                    <dt class="col-5 text-body-secondary">Swift (report)</dt>
-                    <dd class="col-7 font-mono text-break">
-                        {{ report.report.swift_object or '—' }}
+                    <dt class="col-5 text-body-secondary">Report file</dt>
+                    <dd class="col-7 font-mono text-break small">
+                        {{ report.report.filename or '—' }}
                     </dd>
                 </dl>
             </div>
@@ -137,7 +159,10 @@
     </div>
 
     {# ----------------------------------------------------------------- #}
-    {#  Card: Target System Profile (full width)                          #}
+    {#  Card: Target System Profile                                       #}
+    {#  Four sub-columns separated by vertical dividers.                  #}
+    {#  Labels rendered as badges (not plain uppercase text) for          #}
+    {#  stronger visual anchor.                                           #}
     {# ----------------------------------------------------------------- #}
     <div class="col-12">
         <div class="card border-secondary">
@@ -149,11 +174,11 @@
             </div>
 
             <div class="card-body">
-                <div class="row g-4">
+                <div class="row g-0">
 
-                    {# Nova sub-card #}
-                    <div class="col-md-6 col-lg-3">
-                        <div class="small text-body-secondary mb-2">NOVA</div>
+                    {# Nova sub-card — divider on the right #}
+                    <div class="col-md-6 col-lg-3 px-3 border-end border-secondary">
+                        <span class="badge text-bg-secondary mb-3">NOVA</span>
                         <dl class="row small mb-0">
                             <dt class="col-5 text-body-secondary">Status</dt>
                             <dd class="col-7 font-mono">{{ report.target_system.nova.status or '—' }}</dd>
@@ -176,9 +201,9 @@
                         </dl>
                     </div>
 
-                    {# Flavor sub-card #}
-                    <div class="col-md-6 col-lg-3">
-                        <div class="small text-body-secondary mb-2">FLAVOR</div>
+                    {# Flavor sub-card — divider on the right #}
+                    <div class="col-md-6 col-lg-3 px-3 border-end border-secondary">
+                        <span class="badge text-bg-secondary mb-3">FLAVOR</span>
                         <dl class="row small mb-0">
                             <dt class="col-5 text-body-secondary">Name</dt>
                             <dd class="col-7 font-mono">{{ report.target_system.flavor.name or '—' }}</dd>
@@ -202,9 +227,9 @@
                         </dl>
                     </div>
 
-                    {# Glance sub-card — many fields are null for cirros, handled gracefully #}
-                    <div class="col-md-6 col-lg-3">
-                        <div class="small text-body-secondary mb-2">GLANCE (IMAGE)</div>
+                    {# Glance sub-card — divider on the right #}
+                    <div class="col-md-6 col-lg-3 px-3 border-end border-secondary">
+                        <span class="badge text-bg-secondary mb-3">GLANCE (IMAGE)</span>
                         <dl class="row small mb-0">
                             <dt class="col-5 text-body-secondary">Name</dt>
                             <dd class="col-7 font-mono text-break">
@@ -233,9 +258,9 @@
                         </dl>
                     </div>
 
-                    {# Hypervisor + Libvirt sub-card — real ground truth for the dump #}
-                    <div class="col-md-6 col-lg-3">
-                        <div class="small text-body-secondary mb-2">HYPERVISOR &amp; LIBVIRT</div>
+                    {# Hypervisor + Libvirt sub-card — NO divider (last column) #}
+                    <div class="col-md-6 col-lg-3 px-3">
+                        <span class="badge text-bg-secondary mb-3">HYPERVISOR &amp; LIBVIRT</span>
                         <dl class="row small mb-0">
                             <dt class="col-5 text-body-secondary">Type</dt>
                             <dd class="col-7 font-mono">
