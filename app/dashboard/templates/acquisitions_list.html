@@ -109,17 +109,10 @@
                     <td class="font-mono small">{{ acq.operator or '—' }}</td>
 
                     <td class="text-end">
-                        {# Detail page arrives in step 2d — link disabled for now. #}
-                        <span class="d-inline-block"
-                              title="Detail page arrives in step 2d">
-                            <a class="btn btn-sm btn-outline-secondary disabled"
-                               tabindex="-1"
-                               aria-disabled="true"
-                               style="pointer-events: none;"
-                               href="#">
-                                View
-                            </a>
-                        </span>
+                        <a class="btn btn-sm btn-outline-primary"
+                           href="{{ url_for('dashboard.acquisition_detail', acquisition_id=acq.acquisition_id) }}">
+                            View
+                        </a>
                     </td>
                 </tr>
                 {% endfor %}

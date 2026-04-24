@@ -4,10 +4,12 @@ The dashboard consumes the same HTTP API that external clients (curl,
 scripts, Volatility automation in thesis) use.  Rationale covered in
 app/dashboard/__init__.py: zero parallel code paths, single auth model.
 
-Error taxonomy raised to views:
-  - SessionRevokedError  : API returned 401 (token revoked mid-session)
-  - ApiUnavailableError  : transport failure or 5xx from API
-  - ApiClientError       : other 4xx responses (bug in dashboard code)
+Error taxonomy raised to views (all inherit from ApiClientError):
+  - SessionRevokedError : API returned 401    (token revoked/expired)
+  - ApiForbiddenError   : API returned 403    (role removed mid-session)
+  - ApiNotFoundError    : API returned 404    (resource does not exist)
+  - ApiUnavailableError : transport or 5xx    (API down or broken)
+  - ApiClientError      : other 4xx           (likely dashboard bug)
 
 Views do NOT catch these — the blueprint-level errorhandlers in routes.py
 map them to redirects + flash messages uniformly.
@@ -37,10 +39,32 @@ class ApiClientError(RuntimeError):
 
 
 class SessionRevokedError(ApiClientError):
-    """API returned 401 — the user's token is no longer valid.
+    """API returned 401 — token revoked or expired.
 
-    This happens when an admin revokes the token mid-session, or when
-    Keystone's clock disagrees with ours about expiration.
+    The session cookie is still valid client-side but Keystone no longer
+    accepts the token.  Resolution: clear the Flask session, redirect
+    the user back to /dashboard/login.
+    """
+
+
+class ApiForbiddenError(ApiClientError):
+    """API returned 403 — role check failed.
+
+    Distinct from 401 semantically: the token is still authenticated, but
+    the user no longer carries the required 'forensic_analyst' role.
+    This typically means an admin removed the role mid-session.  We do
+    NOT clear the session here — the login itself is still valid, it's
+    authorization that changed.  The right UX is a flash and a redirect,
+    not a re-login prompt.
+    """
+
+
+class ApiNotFoundError(ApiClientError):
+    """API returned 404 — the requested resource does not exist.
+
+    For the detail view: the acquisition_id is not present in any
+    report-*.json object on Swift.  Either a typo in the URL, or the
+    acquisition was listed and deleted between two clicks.
     """
 
 
@@ -82,6 +106,8 @@ def _get(path: str) -> dict:
     """HTTP GET on the loopback API with session token; return parsed JSON.
 
     :raises SessionRevokedError: on HTTP 401.
+    :raises ApiForbiddenError:   on HTTP 403.
+    :raises ApiNotFoundError:    on HTTP 404.
     :raises ApiUnavailableError: on transport error or HTTP 5xx.
     :raises ApiClientError:      on other 4xx responses.
     """
@@ -104,6 +130,16 @@ def _get(path: str) -> dict:
     if resp.status_code == 401:
         log.info("API 401 on %s — token revoked mid-session", path)
         raise SessionRevokedError("the API rejected your session token")
+
+    if resp.status_code == 403:
+        log.info("API 403 on %s — forensic_analyst role missing", path)
+        raise ApiForbiddenError(
+            "the API denied access — required role no longer present"
+        )
+
+    if resp.status_code == 404:
+        log.info("API 404 on %s", path)
+        raise ApiNotFoundError(f"resource not found: {path}")
 
     if resp.status_code >= 500:
         log.error(

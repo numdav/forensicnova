@@ -1,0 +1,358 @@
+{% extends "base.html" %}
+
+{% block title %}
+  {{ report.instance.name or 'Acquisition' }} — ForensicNova
+{% endblock %}
+
+{% block content %}
+
+{# --------------------------------------------------------------------- #}
+{#  Header: VM name + integrity badge + back link                         #}
+{# --------------------------------------------------------------------- #}
+<div class="d-flex justify-content-between align-items-start mb-4">
+    <div>
+        <a href="{{ url_for('dashboard.acquisitions_list') }}"
+           class="text-body-secondary text-decoration-none small">
+            &larr; Back to acquisitions
+        </a>
+        <h2 class="mb-1 mt-2">
+            <span class="text-body-secondary">Target:</span>
+            <span class="font-mono">{{ report.instance.name or '(unknown)' }}</span>
+        </h2>
+        <div class="small text-body-secondary font-mono">
+            acquisition <span class="text-body">{{ report.acquisition_id }}</span>
+        </div>
+    </div>
+
+    <div class="text-end">
+        {% if report.dump.etag_verified %}
+            <span class="badge text-bg-success fs-6">Integrity verified</span>
+        {% else %}
+            <span class="badge text-bg-danger fs-6">Integrity failed</span>
+        {% endif %}
+        <div class="small text-body-secondary mt-2 font-mono">
+            schema v{{ report.schema_version }}
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+
+    {# ----------------------------------------------------------------- #}
+    {#  Card: Case Information                                            #}
+    {# ----------------------------------------------------------------- #}
+    <div class="col-lg-6">
+        <div class="card border-secondary h-100">
+            <div class="card-header bg-body-tertiary border-secondary">
+                <strong>Case information</strong>
+            </div>
+            <div class="card-body">
+                <dl class="row mb-0 small">
+                    <dt class="col-5 text-body-secondary">Operator</dt>
+                    <dd class="col-7 font-mono">{{ report.operator or '—' }}</dd>
+
+                    <dt class="col-5 text-body-secondary">Tool</dt>
+                    <dd class="col-7 font-mono">
+                        {{ report.tool.name }} v{{ report.tool.version }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Started at</dt>
+                    <dd class="col-7 font-mono">
+                        {{ (report.timestamps.started_at or '')[:23] | replace('T', ' ') }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Completed at</dt>
+                    <dd class="col-7 font-mono">
+                        {{ (report.timestamps.completed_at or '')[:23] | replace('T', ' ') }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Duration</dt>
+                    <dd class="col-7 font-mono">
+                        {% if report.timestamps.duration_seconds is not none %}
+                            {{ report.timestamps.duration_seconds }} s
+                        {% else %}—{% endif %}
+                    </dd>
+                </dl>
+            </div>
+        </div>
+    </div>
+
+    {# ----------------------------------------------------------------- #}
+    {#  Card: Evidence Artifacts                                          #}
+    {# ----------------------------------------------------------------- #}
+    <div class="col-lg-6">
+        <div class="card border-secondary h-100">
+            <div class="card-header bg-body-tertiary border-secondary">
+                <strong>Evidence</strong>
+            </div>
+            <div class="card-body">
+                <dl class="row mb-0 small">
+                    <dt class="col-5 text-body-secondary">Size</dt>
+                    <dd class="col-7 font-mono">
+                        {% if report.dump.size_bytes %}
+                            {{ "%.2f"|format(report.dump.size_bytes / 1048576) }} MB
+                            <span class="text-body-secondary">
+                                ({{ "{:,}".format(report.dump.size_bytes) }} bytes)
+                            </span>
+                        {% else %}—{% endif %}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Format</dt>
+                    <dd class="col-7 font-mono">
+                        {{ report.dump.format or '—' }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Method</dt>
+                    <dd class="col-7 font-mono">
+                        {{ report.dump.acquisition_method or '—' }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">MD5</dt>
+                    <dd class="col-7 font-mono text-warning text-break">
+                        {{ report.dump.md5 or '—' }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">SHA-1</dt>
+                    <dd class="col-7 font-mono text-body-secondary text-break">
+                        {{ report.dump.sha1 or '—' }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Swift ETag</dt>
+                    <dd class="col-7 font-mono text-break">
+                        {{ report.dump.swift_etag or '—' }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Swift (dump)</dt>
+                    <dd class="col-7 font-mono text-break">
+                        {{ report.dump.swift_object or '—' }}
+                    </dd>
+
+                    <dt class="col-5 text-body-secondary">Swift (report)</dt>
+                    <dd class="col-7 font-mono text-break">
+                        {{ report.report.swift_object or '—' }}
+                    </dd>
+                </dl>
+            </div>
+        </div>
+    </div>
+
+    {# ----------------------------------------------------------------- #}
+    {#  Card: Target System Profile (full width)                          #}
+    {# ----------------------------------------------------------------- #}
+    <div class="col-12">
+        <div class="card border-secondary">
+            <div class="card-header bg-body-tertiary border-secondary">
+                <strong>Target system</strong>
+                <span class="text-body-secondary small ms-2">
+                    Metadata collected to inform Volatility 3 profile selection.
+                </span>
+            </div>
+
+            <div class="card-body">
+                <div class="row g-4">
+
+                    {# Nova sub-card #}
+                    <div class="col-md-6 col-lg-3">
+                        <div class="small text-body-secondary mb-2">NOVA</div>
+                        <dl class="row small mb-0">
+                            <dt class="col-5 text-body-secondary">Status</dt>
+                            <dd class="col-7 font-mono">{{ report.target_system.nova.status or '—' }}</dd>
+
+                            <dt class="col-5 text-body-secondary">Host</dt>
+                            <dd class="col-7 font-mono">{{ report.target_system.nova.host or '—' }}</dd>
+
+                            <dt class="col-5 text-body-secondary">Instance</dt>
+                            <dd class="col-7 font-mono text-break">
+                                {{ report.instance.id or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">Domain</dt>
+                            <dd class="col-7 font-mono">{{ report.instance.domain or '—' }}</dd>
+
+                            <dt class="col-5 text-body-secondary">Created</dt>
+                            <dd class="col-7 font-mono small">
+                                {{ (report.target_system.nova.created or '')[:19] | replace('T', ' ') }}
+                            </dd>
+                        </dl>
+                    </div>
+
+                    {# Flavor sub-card #}
+                    <div class="col-md-6 col-lg-3">
+                        <div class="small text-body-secondary mb-2">FLAVOR</div>
+                        <dl class="row small mb-0">
+                            <dt class="col-5 text-body-secondary">Name</dt>
+                            <dd class="col-7 font-mono">{{ report.target_system.flavor.name or '—' }}</dd>
+
+                            <dt class="col-5 text-body-secondary">vCPUs</dt>
+                            <dd class="col-7 font-mono">{{ report.target_system.flavor.vcpus or '—' }}</dd>
+
+                            <dt class="col-5 text-body-secondary">RAM</dt>
+                            <dd class="col-7 font-mono">
+                                {% if report.target_system.flavor.ram_mb %}
+                                    {{ report.target_system.flavor.ram_mb }} MB
+                                {% else %}—{% endif %}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">Disk</dt>
+                            <dd class="col-7 font-mono">
+                                {% if report.target_system.flavor.disk_gb is not none %}
+                                    {{ report.target_system.flavor.disk_gb }} GB
+                                {% else %}—{% endif %}
+                            </dd>
+                        </dl>
+                    </div>
+
+                    {# Glance sub-card — many fields are null for cirros, handled gracefully #}
+                    <div class="col-md-6 col-lg-3">
+                        <div class="small text-body-secondary mb-2">GLANCE (IMAGE)</div>
+                        <dl class="row small mb-0">
+                            <dt class="col-5 text-body-secondary">Name</dt>
+                            <dd class="col-7 font-mono text-break">
+                                {{ report.target_system.glance.name or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">Format</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.glance.disk_format or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">OS type</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.glance.os_type or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">OS distro</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.glance.os_distro or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">OS version</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.glance.os_version or '—' }}
+                            </dd>
+                        </dl>
+                    </div>
+
+                    {# Hypervisor + Libvirt sub-card — real ground truth for the dump #}
+                    <div class="col-md-6 col-lg-3">
+                        <div class="small text-body-secondary mb-2">HYPERVISOR &amp; LIBVIRT</div>
+                        <dl class="row small mb-0">
+                            <dt class="col-5 text-body-secondary">Type</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.hypervisor.type or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">Architecture</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.libvirt.architecture or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">Machine</dt>
+                            <dd class="col-7 font-mono text-break">
+                                {{ report.target_system.libvirt.machine_type or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">CPU mode</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.libvirt.cpu_mode or '—' }}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">RAM</dt>
+                            <dd class="col-7 font-mono">
+                                {% if report.target_system.libvirt.memory_mb %}
+                                    {{ report.target_system.libvirt.memory_mb }} MB
+                                {% else %}—{% endif %}
+                            </dd>
+
+                            <dt class="col-5 text-body-secondary">vCPUs</dt>
+                            <dd class="col-7 font-mono">
+                                {{ report.target_system.libvirt.vcpus or '—' }}
+                            </dd>
+                        </dl>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {# ----------------------------------------------------------------- #}
+    {#  Card: Chain of Custody — flat list with color-coded events        #}
+    {# ----------------------------------------------------------------- #}
+    <div class="col-12">
+        <div class="card border-secondary">
+            <div class="card-header bg-body-tertiary border-secondary d-flex justify-content-between align-items-center">
+                <strong>Chain of custody</strong>
+                <span class="badge text-bg-secondary">
+                    {{ report.chain_of_custody.total_events }}
+                    event{{ 's' if report.chain_of_custody.total_events != 1 else '' }}
+                </span>
+            </div>
+
+            <ul class="list-group list-group-flush">
+                {% for event in report.chain_of_custody.events %}
+                    {# Keyword-based color coding — matches event_type vocabulary
+                       documented in app/reports/json_report.py._EVENT_DESCRIPTIONS. #}
+                    {% set ev = event.event_type or '' %}
+                    {% if 'failed' in ev or 'integrity_failure' in ev %}
+                        {% set accent_class = 'text-danger fw-semibold' %}
+                        {% set left_border = 'border-start border-3 border-danger' %}
+                    {% elif 'preserved' in ev %}
+                        {% set accent_class = 'text-warning fw-semibold' %}
+                        {% set left_border = 'border-start border-3 border-warning' %}
+                    {% elif 'verified' in ev or 'completed' in ev or 'secure_deleted' in ev %}
+                        {% set accent_class = 'text-success' %}
+                        {% set left_border = 'border-start border-3 border-success' %}
+                    {% else %}
+                        {% set accent_class = 'text-body' %}
+                        {% set left_border = 'border-start border-3 border-secondary' %}
+                    {% endif %}
+
+                    <li class="list-group-item {{ left_border }}">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <span class="badge text-bg-dark font-mono me-2">
+                                    {{ "%02d"|format(event.seq) }}
+                                </span>
+                                <span class="font-mono {{ accent_class }}">
+                                    {{ event.event_type }}
+                                </span>
+                                <div class="small text-body-secondary mt-1">
+                                    {{ event.description }}
+                                </div>
+                            </div>
+
+                            <div class="text-end">
+                                <span class="font-mono small text-body-secondary">
+                                    {{ (event.timestamp or '')[11:23] }}
+                                </span>
+                                {% if event.data %}
+                                    <div class="mt-1">
+                                        <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                                type="button"
+                                                data-bs-toggle="collapse"
+                                                data-bs-target="#coc-data-{{ event.seq }}"
+                                                aria-expanded="false"
+                                                aria-controls="coc-data-{{ event.seq }}">
+                                            data
+                                        </button>
+                                    </div>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        {% if event.data %}
+                            <div class="collapse mt-2" id="coc-data-{{ event.seq }}">
+                                <pre class="small mb-0 bg-body-tertiary p-2 rounded font-mono"
+                                     style="white-space: pre-wrap;">{{ event.data | tojson(indent=2) }}</pre>
+                            </div>
+                        {% endif %}
+                    </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}

@@ -1,14 +1,17 @@
 """ForensicNova dashboard — HTTP route handlers.
 
 Routes:
-  GET  /dashboard/         -> acquisitions list (login required) — the home
-  GET  /dashboard/login    -> render login form
-  POST /dashboard/login    -> validate form, auth to Keystone, set session
-  GET  /dashboard/logout   -> revoke Keystone token, clear session
+  GET  /dashboard/                        -> acquisitions list (home)
+  GET  /dashboard/acquisitions/<id>       -> single-acquisition detail
+  GET  /dashboard/login                   -> render login form
+  POST /dashboard/login                   -> validate, auth to Keystone, set session
+  GET  /dashboard/logout                  -> revoke token, clear session
 
 Error handling — blueprint-level, centralized:
   SessionRevokedError  -> clear session + flash + redirect to /login
-  ApiUnavailableError  -> flash banner + render page with empty data, HTTP 503
+  ApiForbiddenError    -> flash + redirect to list (session stays)
+  ApiNotFoundError     -> flash + redirect to list (404 is mild)
+  ApiUnavailableError  -> flash banner + render list with empty data, HTTP 503
 
 The error handlers live on the blueprint, so any view can raise the
 typed exceptions (via api_client) without try/except — Flask routes the
@@ -27,8 +30,11 @@ from flask import (
 )
 
 from app.dashboard.api_client import (
+    ApiForbiddenError,
+    ApiNotFoundError,
     ApiUnavailableError,
     SessionRevokedError,
+    get_acquisition,
     list_acquisitions,
 )
 from app.dashboard.decorators import login_required
@@ -65,6 +71,33 @@ def _handle_session_revoked(exc: SessionRevokedError):
     return redirect(url_for("dashboard.login"))
 
 
+@dashboard_bp.errorhandler(ApiForbiddenError)
+def _handle_api_forbidden(exc: ApiForbiddenError):
+    """Role was removed mid-session — session is still valid, just powerless."""
+    current_app.logger.info(
+        "api forbidden mid-request: user=%s",
+        session.get("username", "unknown"),
+    )
+    flash(
+        "Access denied by the API. The forensic_analyst role may have "
+        "been removed from your account. Contact your administrator.",
+        "danger",
+    )
+    return redirect(url_for("dashboard.acquisitions_list"))
+
+
+@dashboard_bp.errorhandler(ApiNotFoundError)
+def _handle_api_not_found(exc: ApiNotFoundError):
+    """Resource is gone (typo in URL or deleted after listing)."""
+    current_app.logger.info("api 404: %s", exc)
+    flash(
+        "The requested acquisition was not found. It may have been "
+        "removed from Swift, or the link is stale.",
+        "warning",
+    )
+    return redirect(url_for("dashboard.acquisitions_list"))
+
+
 @dashboard_bp.errorhandler(ApiUnavailableError)
 def _handle_api_unavailable(exc: ApiUnavailableError):
     """Loopback API is down — render the page frame with empty data."""
@@ -94,7 +127,7 @@ def acquisitions_list():
     """Home — table of all acquisitions.
 
     Feeds from GET /api/v1/acquisitions/ via the loopback client.
-    Exceptions propagate to the blueprint errorhandlers above — no try/except.
+    Exceptions propagate to the blueprint errorhandlers — no try/except.
     """
     result = list_acquisitions()
     return render_template(
@@ -103,6 +136,23 @@ def acquisitions_list():
         count=result.get("count", 0),
         api_down=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /dashboard/acquisitions/<id>   — single-acquisition detail
+# ---------------------------------------------------------------------------
+
+@dashboard_bp.route("/acquisitions/<acquisition_id>")
+@login_required
+def acquisition_detail(acquisition_id: str):
+    """Detail page for a single acquisition.
+
+    Feeds from GET /api/v1/acquisitions/<id> via the loopback client.
+    Full schema v1.1 is passed to the template; Jinja2 handles the
+    heavy rendering work (case info, target system, CoC timeline).
+    """
+    report = get_acquisition(acquisition_id)
+    return render_template("acquisition_detail.html", report=report)
 
 
 # ---------------------------------------------------------------------------
