@@ -15,7 +15,6 @@ Design rationale:
    - core_bp:       /health, /version    (unauthenticated, root mount).
    - api_v1_bp:     /api/v1/*             (Keystone X-Auth-Token, token-based).
    - dashboard_bp:  /dashboard/*          (Keystone session, cookie-based).
-                                          FASE 5 step 2b+ — not yet wired here.
 
 3. Logging
    - Dual sink: rotating file in cfg.log_dir AND stderr (journald captures
@@ -56,9 +55,8 @@ Design rationale:
    - Flask-WTF CSRFProtect is initialised globally, then the API blueprints
      are EXEMPTED.  The API is consumed with X-Auth-Token by non-browser
      clients (curl, scripts, the dashboard itself via loopback) — CSRF
-     tokens would break them.  Only the dashboard blueprint (added in 2b)
-     will actually be CSRF-protected, since only it consumes HTML forms
-     with cookie authentication.
+     tokens would break them.  Only the dashboard blueprint is actually
+     CSRF-protected, since only it consumes HTML forms with cookie auth.
 """
 from __future__ import annotations
 
@@ -237,13 +235,17 @@ def create_app(config: Optional[Config] = None) -> Flask:
     _configure_session(app, cfg)
 
     from app.api import core_bp, api_v1_bp
+    from app.dashboard import dashboard_bp
+
     app.register_blueprint(core_bp)
     app.register_blueprint(api_v1_bp, url_prefix="/api/v1")
+    app.register_blueprint(dashboard_bp, url_prefix="/dashboard")
 
     # CSRF protection — global init, then exempt the token-authenticated API
     # blueprints.  Non-browser clients (curl, scripts, the dashboard via
     # loopback with X-Auth-Token) must not be forced to carry a CSRF token.
-    # Only dashboard_bp (registered in step 2b) will actually be protected.
+    # dashboard_bp is deliberately NOT exempted — its HTML forms carry a
+    # CSRF token via {{ form.hidden_tag() }}.
     csrf = CSRFProtect(app)
     csrf.exempt(core_bp)
     csrf.exempt(api_v1_bp)

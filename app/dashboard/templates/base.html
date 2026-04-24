@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ForensicNova{% endblock %}</title>
+
+    <!-- Bootstrap 5 (CDN) — no build pipeline required.
+         Pinning a specific version so a CDN upgrade does not break layout. -->
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+        crossorigin="anonymous">
+
+    <style>
+        /* Monospace accent for anything forensic-ish (hashes, UUIDs, CoC).  */
+        .font-mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+        /* Slightly tighter main container — forensic consoles are read-heavy,
+           not marketing pages, so we don't need wide whitespace. */
+        main.container { max-width: 1140px; }
+
+        /* Give the navbar a bit more presence via a thin accent stripe. */
+        .navbar.fn-nav {
+            border-bottom: 2px solid var(--bs-border-color);
+        }
+
+        /* Flash messages should never collapse to zero height; make sure
+           they read as an alert even when the body has a single word. */
+        .alert { margin-bottom: 1rem; }
+    </style>
+
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg fn-nav mb-4">
+    <div class="container">
+        <a class="navbar-brand fw-semibold" href="{{ url_for('dashboard.home') }}">
+            ForensicNova
+            <span class="badge text-bg-secondary ms-1 font-mono" style="font-size: 0.7rem;">
+                DFIR
+            </span>
+        </a>
+
+        {% if session.get('keystone_token') %}
+            <div class="d-flex align-items-center gap-3">
+                <span class="text-body-secondary small">
+                    Analyst:
+                    <span class="font-mono">{{ session.get('username', '?') }}</span>
+                    <span class="text-secondary">@</span>
+                    <span class="font-mono">{{ session.get('project_name', '?') }}</span>
+                </span>
+                <a href="{{ url_for('dashboard.logout') }}"
+                   class="btn btn-sm btn-outline-secondary">
+                    Sign out
+                </a>
+            </div>
+        {% endif %}
+    </div>
+</nav>
+
+<main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                {# Map arbitrary flash categories to valid Bootstrap alert classes. #}
+                {% set css = {
+                    'success': 'alert-success',
+                    'danger':  'alert-danger',
+                    'warning': 'alert-warning',
+                    'info':    'alert-info',
+                }.get(category, 'alert-secondary') %}
+                <div class="alert {{ css }} alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close"
+                            data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="container mt-5 mb-4 text-secondary small">
+    <hr class="border-secondary">
+    <div class="d-flex justify-content-between">
+        <span>ForensicNova prototype — DFIR memory acquisition plugin for OpenStack.</span>
+        <span class="font-mono">v0.1.0</span>
+    </div>
+</footer>
+
+<!-- Bootstrap JS (for alert dismiss button) -->
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"></script>
+
+{% block extra_js %}{% endblock %}
+
+</body>
+</html>

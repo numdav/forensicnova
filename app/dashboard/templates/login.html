@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Sign In — ForensicNova{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center mt-4">
+    <div class="col-md-6 col-lg-5">
+
+        <div class="card border-secondary shadow-sm">
+            <div class="card-header bg-body-tertiary border-secondary">
+                <h5 class="card-title mb-0">
+                    DFIR Analyst Sign In
+                </h5>
+                <small class="text-body-secondary">
+                    Authenticate against Keystone with your forensic_analyst credentials.
+                </small>
+            </div>
+
+            <div class="card-body">
+                <form method="POST" novalidate>
+                    {# Injects the CSRF token as a hidden field.  Flask-WTF
+                       validates it automatically on POST. #}
+                    {{ form.hidden_tag() }}
+
+                    <div class="mb-3">
+                        {{ form.username.label(class="form-label") }}
+                        {{ form.username(class="form-control font-mono",
+                                         placeholder="e.g. dfir-tester") }}
+                        {% if form.username.errors %}
+                            <div class="form-text text-danger">
+                                {{ form.username.errors[0] }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="mb-3">
+                        {{ form.password.label(class="form-label") }}
+                        {{ form.password(class="form-control font-mono") }}
+                        {% if form.password.errors %}
+                            <div class="form-text text-danger">
+                                {{ form.password.errors[0] }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="d-grid mt-4">
+                        {{ form.submit(class="btn btn-primary") }}
+                    </div>
+                </form>
+            </div>
+
+            <div class="card-footer bg-body-tertiary border-secondary small text-body-secondary">
+                Project scope is fixed to <span class="font-mono">forensics</span>.
+                Role required: <span class="font-mono">forensic_analyst</span>.
+            </div>
+        </div>
+
+    </div>
+</div>
+{% endblock %}
