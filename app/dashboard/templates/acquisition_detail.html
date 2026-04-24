@@ -17,14 +17,15 @@
         </a>
 
         <div class="mt-2 d-flex align-items-baseline gap-3">
-            <span class="fs-3 text-body">Target:</span>
-            <h1 class="mb-0 text-info font-mono fw-semibold">
+            <span class="fs-2 fw-semibold text-body">Target:</span>
+            <span class="fs-2 fw-semibold text-info font-mono">
                 {{ report.instance.name or '(unknown)' }}
-            </h1>
+            </span>
         </div>
 
-        <div class="small text-body-secondary font-mono mt-2">
-            acquisition <span class="text-body">{{ report.acquisition_id }}</span>
+        <div class="small text-body-secondary mt-2">
+            <span class="text-body-secondary">ID:</span>
+            <span class="font-mono text-body">{{ report.acquisition_id }}</span>
         </div>
     </div>
 
