@@ -1,25 +1,15 @@
-"""ForensicNova dashboard — HTTP route handlers.
-
-Routes:
-  GET  /dashboard/                        -> acquisitions list (home)
-  GET  /dashboard/acquisitions/<id>       -> single-acquisition detail
-  GET  /dashboard/acquire                 -> render acquisition trigger form
-  POST /dashboard/acquire                 -> trigger acquisition, redirect to detail
-  GET  /dashboard/login                   -> render login form
-  POST /dashboard/login                   -> validate, auth to Keystone, set session
-  GET  /dashboard/logout                  -> revoke token, clear session
-
-Error handling — blueprint-level, centralized.
-"""
+"""ForensicNova dashboard — HTTP route handlers."""
 from __future__ import annotations
 
 from flask import (
     Blueprint,
+    Response,
     current_app,
     flash,
     redirect,
     render_template,
     session,
+    stream_with_context,
     url_for,
 )
 
@@ -32,6 +22,8 @@ from app.dashboard.api_client import (
     get_acquisition,
     list_acquisitions,
     list_servers,
+    stream_dump,
+    stream_report,
     trigger_acquisition,
 )
 from app.dashboard.decorators import login_required
@@ -94,7 +86,6 @@ def _handle_api_not_found(exc: ApiNotFoundError):
 
 @dashboard_bp.errorhandler(AcquisitionError)
 def _handle_acquisition_failed(exc: AcquisitionError):
-    """Pipeline rejected the acquisition (libvirt error, integrity, etc.)."""
     current_app.logger.error("acquisition failed: %s | detail=%s", exc, exc.detail)
     detail_reason = exc.detail.get("error", "unknown_error")
     flash(
@@ -138,7 +129,7 @@ def acquisitions_list():
 
 
 # ---------------------------------------------------------------------------
-# GET /dashboard/acquisitions/<id>
+# GET /dashboard/acquisitions/<id>   — detail page
 # ---------------------------------------------------------------------------
 
 @dashboard_bp.route("/acquisitions/<acquisition_id>")
@@ -149,6 +140,59 @@ def acquisition_detail(acquisition_id: str):
 
 
 # ---------------------------------------------------------------------------
+# GET /dashboard/acquisitions/<id>/download_dump
+# GET /dashboard/acquisitions/<id>/download_report
+# ---------------------------------------------------------------------------
+
+@dashboard_bp.route("/acquisitions/<acquisition_id>/download_dump")
+@login_required
+def download_dump(acquisition_id: str):
+    """Stream the .raw dump from Swift through the API to the browser."""
+    current_app.logger.info(
+        "dashboard download_dump: user=%s acq=%s",
+        session.get("username", "unknown"), acquisition_id,
+    )
+    filename, content_length, chunks = stream_dump(acquisition_id)
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if content_length:
+        headers["Content-Length"] = content_length
+
+    return Response(
+        stream_with_context(chunks),
+        mimetype="application/octet-stream",
+        headers=headers,
+    )
+
+
+@dashboard_bp.route("/acquisitions/<acquisition_id>/download_report")
+@login_required
+def download_report(acquisition_id: str):
+    """Download the JSON report as attachment (served by the API)."""
+    current_app.logger.info(
+        "dashboard download_report: user=%s acq=%s",
+        session.get("username", "unknown"), acquisition_id,
+    )
+    filename, content_length, chunks = stream_report(acquisition_id)
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if content_length:
+        headers["Content-Length"] = content_length
+
+    return Response(
+        stream_with_context(chunks),
+        mimetype="application/json",
+        headers=headers,
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET  /dashboard/acquire   — render the trigger form
 # POST /dashboard/acquire   — fire the acquisition
 # ---------------------------------------------------------------------------
@@ -156,14 +200,9 @@ def acquisition_detail(acquisition_id: str):
 @dashboard_bp.route("/acquire", methods=["GET", "POST"])
 @login_required
 def acquire():
-    """Trigger a new acquisition: pick a VM, confirm, wait for completion."""
-    # Fetch the fresh server list and build form choices.
     servers_resp = list_servers()
     servers = servers_resp.get("servers", [])
 
-    # Keep ACTIVE at top of the dropdown, others below.  SelectField
-    # choices: list of (value, label) tuples.  We encode (status, ram_mb)
-    # into the label so the template can split on ' | ' and style per-option.
     active   = [s for s in servers if s.get("status") == "ACTIVE"]
     inactive = [s for s in servers if s.get("status") != "ACTIVE"]
 
@@ -183,10 +222,6 @@ def acquire():
     if form.validate_on_submit():
         target_id = form.instance_id.data
 
-        # Hard guard: refuse to submit non-ACTIVE VMs even if the client
-        # tampered with the form to send a disabled option value.  libvirt
-        # coreDump fails on shutoff VMs — we fail fast with a meaningful
-        # message instead of waiting for the pipeline to blow up.
         picked = next((s for s in servers if s["id"] == target_id), None)
         if not picked:
             flash("Selected VM is no longer present. Refresh the list.", "warning")
@@ -205,8 +240,6 @@ def acquire():
             target_id, picked.get("name"),
         )
 
-        # Blocks until the pipeline completes (see api_client timeouts).
-        # Exceptions propagate to the blueprint errorhandlers.
         result = trigger_acquisition(target_id)
 
         acq_id = result.get("acquisition_id")
@@ -220,7 +253,6 @@ def acquire():
         )
         return redirect(url_for("dashboard.acquisition_detail", acquisition_id=acq_id))
 
-    # GET or failed POST validation
     return render_template(
         "acquire_form.html",
         form=form,

@@ -11,14 +11,16 @@ Authentication contract:
 
 Endpoints:
   POST /servers/<instance_id>/memory_acquire   — trigger acquisition pipeline
-  GET  /servers/                               — list all Nova instances (FASE 5)
+  GET  /servers/                               — list all Nova instances
   GET  /acquisitions/                          — list all acquisitions (summary)
   GET  /acquisitions/<acquisition_id>          — full report for one acquisition
+  GET  /acquisitions/<acquisition_id>/dump     — download .raw dump (streaming)
+  GET  /acquisitions/<acquisition_id>/report   — download .json report
 
 Pipeline ordering (FASE 4 final):
   1. acquire_memory         (libvirt dump, chown, staging)
   2. compute_hashes         (MD5 + SHA1 streaming)
-  3. nova_metadata.collect  (Nova + Glance + libvirt XML — drives VM-naming)
+  3. nova_metadata.collect  (Nova + Glance + libvirt XML)
   4. upload_dump            (Swift PUT + etag verification)
   5. secure_delete          (shred -u local dump; only if etag verified)
   6. generate_report        (full CoC + self-referencing report.swift_object)
@@ -36,7 +38,7 @@ import uuid
 from datetime import datetime, timezone
 
 import libvirt
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from app.forensics.acquirer import acquire_memory, secure_delete
 from app.forensics import nova_metadata
@@ -48,6 +50,7 @@ from app.storage.swift_client import (
     SwiftObjectNotFound,
     download_json,
     list_reports,
+    stream_object,
     upload_dump,
     upload_json,
 )
@@ -121,7 +124,6 @@ def memory_acquire(instance_id: str):
     })
 
     try:
-        # 1. Acquire RAM via libvirt
         dump_path = acquire_memory(
             instance_id=instance_id,
             acquisition_id=acquisition_id,
@@ -131,10 +133,8 @@ def memory_acquire(instance_id: str):
         )
         domain_name = _lookup_domain_name(cfg.libvirt_uri, instance_id)
 
-        # 2. Hash dump (streaming MD5 + SHA1)
         hash_result = compute_hashes(dump_path, log_event=coc.log_event)
 
-        # 3. Collect OpenStack-side metadata (provides VM name for naming)
         target_system = nova_metadata.collect(
             instance_id=instance_id,
             domain_name=domain_name,
@@ -152,7 +152,6 @@ def memory_acquire(instance_id: str):
         swift_object_name  = f"dump-{vm_name_safe}-{timestamp_compact}.raw"
         report_object_name = f"report-{vm_name_safe}-{timestamp_compact}.json"
 
-        # 4. Upload dump to Swift with etag verification
         swift_metadata = {
             "acquisition_id": acquisition_id,
             "operator":       operator,
@@ -172,7 +171,6 @@ def memory_acquire(instance_id: str):
             log_event=coc.log_event,
         )
 
-        # 5. Secure-delete local dump — ONLY if etag verified.
         if swift_result["etag_verified"]:
             secure_delete(dump_path)
             coc.log_event("local_dump_secure_deleted", {
@@ -187,7 +185,6 @@ def memory_acquire(instance_id: str):
                 "reason": "etag_not_verified",
             })
 
-        # 6. Generate JSON report (with self-referencing report block)
         completed_at = _utc_now_iso()
         report = generate_report(
             acquisition_id=acquisition_id,
@@ -207,7 +204,6 @@ def memory_acquire(instance_id: str):
         )
         report_bytes = serialize_report(report)
 
-        # 7. Upload report
         report_swift_result = upload_json(
             json_bytes=report_bytes,
             object_name=report_object_name,
@@ -287,17 +283,11 @@ def memory_acquire(instance_id: str):
 
 
 # ---------------------------------------------------------------------------
-# GET /servers/   — list Nova instances (FASE 5 step 2e)
+# GET /servers/   — list Nova instances
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/servers/", methods=["GET"])
 def list_servers():
-    """Cross-tenant enumeration of Nova instances for the dashboard picker.
-
-    Delegates to nova_metadata.list_all_servers(), which authenticates as
-    dfir-tester (with cross-tenant admin role) and queries Nova with
-    all_tenants=True.  Returns a compact summary list.
-    """
     cfg = current_app.config["FORENSICNOVA"]
     operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
 
@@ -324,19 +314,6 @@ def list_servers():
 
 @api_v1_bp.route("/acquisitions/", methods=["GET"])
 def list_acquisitions():
-    """List all acquisitions by scanning Swift 'report-*.json' objects.
-
-    Strategy: naive-but-correct full scan.
-      - 1 HTTP call to Swift to list container contents (filtered by prefix).
-      - N HTTP calls to Swift to download each report JSON.
-      - Extract summary fields from each report.
-      - Skip broken reports with a warning (log only); never fail the whole list.
-      - Sort by completed_at DESC (most recent first).
-
-    For the exam prototype this scales comfortably to hundreds of acquisitions.
-    Thesis optimization: store summary fields as X-Object-Meta-* headers on
-    upload, then a single HEAD per object suffices — no body download.
-    """
     cfg = current_app.config["FORENSICNOVA"]
     operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
 
@@ -384,16 +361,6 @@ def list_acquisitions():
 
 @api_v1_bp.route("/acquisitions/<acquisition_id>", methods=["GET"])
 def get_acquisition(acquisition_id: str):
-    """Fetch the full JSON report for a specific acquisition.
-
-    Strategy: full scan of report-*.json objects, return the one whose
-    'acquisition_id' field matches.  Inefficient by design (N downloads)
-    but keeps the API stateless and always consistent with Swift —
-    no separate index to get out of sync.
-
-    Thesis optimization: on upload, set X-Object-Meta-Acquisition-Id header;
-    then a single Swift listing with metadata filter replaces the scan.
-    """
     cfg = current_app.config["FORENSICNOVA"]
     operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
 
@@ -402,47 +369,178 @@ def get_acquisition(acquisition_id: str):
         acquisition_id, operator,
     )
 
-    try:
-        report_names = list_reports(cfg)
-    except Exception as exc:
-        log.exception("list_reports failed")
+    report = _find_report_by_acquisition_id(acquisition_id, cfg)
+    if report is None:
         return jsonify(
-            error="swift_list_failed",
+            error="not_found",
+            detail=f"no acquisition found with id {acquisition_id}",
+            acquisition_id=acquisition_id,
+        ), 404
+
+    return jsonify(report), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /acquisitions/<acquisition_id>/dump     — streaming download .raw
+# GET /acquisitions/<acquisition_id>/report   — download .json
+# ---------------------------------------------------------------------------
+
+@api_v1_bp.route("/acquisitions/<acquisition_id>/dump", methods=["GET"])
+def download_acquisition_dump(acquisition_id: str):
+    """Stream the raw memory dump to the client.
+
+    The body is streamed chunk-by-chunk directly from Swift through Flask —
+    never fully loaded into the API process's RAM.  For a 4 GB Windows
+    dump this means constant ~1 MB memory usage regardless of file size.
+    """
+    cfg = current_app.config["FORENSICNOVA"]
+    operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
+
+    log.info(
+        "download_dump: acq_id=%s operator=%s",
+        acquisition_id, operator,
+    )
+
+    report = _find_report_by_acquisition_id(acquisition_id, cfg)
+    if report is None:
+        return jsonify(
+            error="not_found",
+            detail=f"no acquisition found with id {acquisition_id}",
+        ), 404
+
+    swift_object = (report.get("dump") or {}).get("swift_object") or ""
+    object_name = _extract_object_name(swift_object)
+    if not object_name:
+        log.error("malformed swift_object field in report: %r", swift_object)
+        return jsonify(
+            error="report_malformed",
+            detail="report does not contain a valid dump.swift_object",
+        ), 500
+
+    try:
+        headers, body_iter = stream_object(object_name, cfg)
+    except SwiftObjectNotFound:
+        return jsonify(
+            error="not_found",
+            detail=f"dump object no longer in Swift: {object_name}",
+        ), 404
+    except Exception as exc:  # noqa: BLE001
+        log.exception("stream_object failed for %s", object_name)
+        return jsonify(
+            error="swift_stream_failed",
             detail=str(exc),
         ), 502
+
+    size = headers.get("content-length", "")
+    log.info(
+        "download_dump: streaming %s (%s bytes) to operator=%s",
+        object_name, size, operator,
+    )
+
+    return Response(
+        stream_with_context(body_iter),
+        mimetype="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{object_name}"',
+            "Content-Length":      size,
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@api_v1_bp.route("/acquisitions/<acquisition_id>/report", methods=["GET"])
+def download_acquisition_report(acquisition_id: str):
+    """Download the JSON report as an attachment (not rendered inline)."""
+    cfg = current_app.config["FORENSICNOVA"]
+    operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
+
+    log.info(
+        "download_report: acq_id=%s operator=%s",
+        acquisition_id, operator,
+    )
+
+    report = _find_report_by_acquisition_id(acquisition_id, cfg)
+    if report is None:
+        return jsonify(
+            error="not_found",
+            detail=f"no acquisition found with id {acquisition_id}",
+        ), 404
+
+    # Object name is either in the self-referencing report block (preferred)
+    # or derivable via full-scan (we already have it from the lookup, but
+    # the lookup doesn't expose the name).  Use the self-ref.
+    report_block = report.get("report") or {}
+    object_name = report_block.get("filename") or _extract_object_name(
+        report_block.get("swift_object", "")
+    )
+    if not object_name:
+        return jsonify(
+            error="report_malformed",
+            detail="report does not contain a valid self-reference filename",
+        ), 500
+
+    body_bytes = json.dumps(report, indent=2, ensure_ascii=False).encode("utf-8")
+
+    return Response(
+        body_bytes,
+        mimetype="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{object_name}"',
+            "Content-Length":      str(len(body_bytes)),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _find_report_by_acquisition_id(acquisition_id: str, cfg):
+    """Scan Swift report-*.json and return the parsed report matching the id.
+
+    Shared between GET /acquisitions/<id>, /dump, and /report.  See the
+    thesis optimization note in the original list_acquisitions docstring.
+    """
+    try:
+        report_names = list_reports(cfg)
+    except Exception:
+        log.exception("list_reports failed")
+        raise
 
     for name in report_names:
         try:
             raw = download_json(name, cfg)
             report = json.loads(raw.decode("utf-8"))
         except SwiftObjectNotFound:
-            # Race condition: report was listed but deleted before we could
-            # fetch it.  Not our acquisition, skip.
             continue
         except Exception as exc:  # noqa: BLE001
             log.warning("skipping unreadable report %s: %s", name, exc)
             continue
 
         if report.get("acquisition_id") == acquisition_id:
-            log.info(
-                "get_acquisition: match found in %s", name,
-            )
-            return jsonify(report), 200
+            log.debug("found report in %s for acq=%s", name, acquisition_id)
+            return report
 
     log.info(
-        "get_acquisition: no match for acq_id=%s (scanned %d objects)",
+        "no report found for acq=%s (scanned %d objects)",
         acquisition_id, len(report_names),
     )
-    return jsonify(
-        error="not_found",
-        detail=f"no acquisition found with id {acquisition_id}",
-        acquisition_id=acquisition_id,
-    ), 404
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _extract_object_name(swift_object_path: str) -> str:
+    """Extract the object name from a 'container/object' path.
+
+    Swift paths in the report look like 'forensics/dump-vm-ts.raw'.
+    We use the object name (no container) for swiftclient calls.
+    """
+    if not swift_object_path:
+        return ""
+    if "/" in swift_object_path:
+        return swift_object_path.split("/", 1)[1]
+    return swift_object_path
+
 
 def _build_summary(report: dict, object_name: str) -> dict:
     """Project a full report JSON onto a compact summary dict for listing."""
@@ -462,7 +560,7 @@ def _build_summary(report: dict, object_name: str) -> dict:
         "duration_seconds": timestamps.get("duration_seconds"),
         "size_bytes":       dump.get("size_bytes"),
         "md5":              dump.get("md5"),
-        "sha1":              dump.get("sha1"),
+        "sha1":             dump.get("sha1"),
         "etag_verified":    dump.get("etag_verified"),
         "swift_dump":       dump.get("swift_object"),
         "swift_report":     report_blk.get("swift_object"),

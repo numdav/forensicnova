@@ -41,6 +41,33 @@
     </div>
 </div>
 
+{# --------------------------------------------------------------------- #}
+{#  Actions block — forensic exports for downstream analysis              #}
+{# --------------------------------------------------------------------- #}
+<div class="card border-info-subtle mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center gap-3">
+            <div class="me-auto">
+                <strong class="d-block">Export forensic artifacts</strong>
+                <span class="small text-body-secondary">
+                    The .raw dump feeds Volatility 3 / Autopsy;
+                    the .json report is the chain-of-custody record.
+                </span>
+            </div>
+            <a class="btn btn-primary"
+               href="{{ url_for('dashboard.download_dump',
+                                acquisition_id=report.acquisition_id) }}">
+                Download dump (.raw)
+            </a>
+            <a class="btn btn-outline-primary"
+               href="{{ url_for('dashboard.download_report',
+                                acquisition_id=report.acquisition_id) }}">
+                Download report (.json)
+            </a>
+        </div>
+    </div>
+</div>
+
 <div class="row g-4">
 
     {# ----------------------------------------------------------------- #}
@@ -84,9 +111,6 @@
 
     {# ----------------------------------------------------------------- #}
     {#  Card: Evidence                                                    #}
-    {#  - Evidence file name is prominent (SIFT workflow hint).           #}
-    {#  - MD5 / SHA1 shown in neutral text — integrity is already         #}
-    {#    communicated by the badge in the header.                        #}
     {# ----------------------------------------------------------------- #}
     <div class="col-lg-6">
         <div class="card border-secondary h-100">
@@ -95,8 +119,6 @@
             </div>
             <div class="card-body">
 
-                {# Prominent evidence file block — the analyst's landmark
-                   when looking for the dump in SIFT's storage. #}
                 <div class="mb-3 p-3 rounded border border-info-subtle bg-body-tertiary">
                     <div class="small text-body-secondary mb-1">
                         EVIDENCE FILE
@@ -161,9 +183,6 @@
 
     {# ----------------------------------------------------------------- #}
     {#  Card: Target System Profile                                       #}
-    {#  Four sub-columns separated by vertical dividers.                  #}
-    {#  Labels rendered as badges (not plain uppercase text) for          #}
-    {#  stronger visual anchor.                                           #}
     {# ----------------------------------------------------------------- #}
     <div class="col-12">
         <div class="card border-secondary">
@@ -177,7 +196,6 @@
             <div class="card-body">
                 <div class="row g-0">
 
-                    {# Nova sub-card — divider on the right #}
                     <div class="col-md-6 col-lg-3 px-3 border-end border-secondary">
                         <span class="badge text-bg-secondary mb-3">NOVA</span>
                         <dl class="row small mb-0">
@@ -202,7 +220,6 @@
                         </dl>
                     </div>
 
-                    {# Flavor sub-card — divider on the right #}
                     <div class="col-md-6 col-lg-3 px-3 border-end border-secondary">
                         <span class="badge text-bg-secondary mb-3">FLAVOR</span>
                         <dl class="row small mb-0">
@@ -228,7 +245,6 @@
                         </dl>
                     </div>
 
-                    {# Glance sub-card — divider on the right #}
                     <div class="col-md-6 col-lg-3 px-3 border-end border-secondary">
                         <span class="badge text-bg-secondary mb-3">GLANCE (IMAGE)</span>
                         <dl class="row small mb-0">
@@ -259,7 +275,6 @@
                         </dl>
                     </div>
 
-                    {# Hypervisor + Libvirt sub-card — NO divider (last column) #}
                     <div class="col-md-6 col-lg-3 px-3">
                         <span class="badge text-bg-secondary mb-3">HYPERVISOR &amp; LIBVIRT</span>
                         <dl class="row small mb-0">
@@ -317,10 +332,6 @@
 
             <ul class="list-group list-group-flush">
                 {% for event in report.chain_of_custody.events %}
-                    {# Color coding kept minimal: only failures stand out.
-                       The narrative flow is already carried by seq numbers
-                       and timestamps; aggressive coloring on 'completed'
-                       events would flood the eye with green noise. #}
                     {% set ev = event.event_type or '' %}
                     {% if 'failed' in ev or 'integrity_failure' in ev %}
                         {% set accent_class = 'text-danger fw-semibold' %}

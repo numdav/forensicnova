@@ -1,19 +1,12 @@
 """ForensicNova dashboard — loopback client to the forensic REST API.
 
-The dashboard consumes the same HTTP API that external clients (curl,
-scripts, Volatility automation in thesis) use.  Rationale covered in
-app/dashboard/__init__.py: zero parallel code paths, single auth model.
-
 Error taxonomy raised to views (all inherit from ApiClientError):
   - SessionRevokedError : API returned 401    (token revoked/expired)
   - ApiForbiddenError   : API returned 403    (role removed mid-session)
   - ApiNotFoundError    : API returned 404    (resource does not exist)
   - AcquisitionError    : acquisition pipeline failed (500/502 on POST)
   - ApiUnavailableError : transport or other 5xx
-  - ApiClientError      : other 4xx           (likely dashboard bug)
-
-Views do NOT catch these — the blueprint-level errorhandlers in routes.py
-map them to redirects + flash messages uniformly.
+  - ApiClientError      : other 4xx
 """
 from __future__ import annotations
 
@@ -24,21 +17,16 @@ from flask import session
 
 log = logging.getLogger("forensicnova.dashboard.api")
 
-# Loopback target — same WSGI process, different blueprint.
 _API_BASE = "http://127.0.0.1:5234/api/v1"
 
-# Timeouts.
-# - GETs: generous read (15s) for list ops that iterate Swift objects
-# - POST memory_acquire: very long read (10 min) because the acquisition
-#   pipeline runs synchronously end-to-end (libvirt dump + MD5/SHA1 +
-#   Swift upload + secure delete + report).  A 512 MB cirros takes ~12s;
-#   a 4 GB Windows Server can take 2-3 minutes; we leave headroom.
-#   If the browser-side ever times out before this, the server-side
-#   pipeline will still complete and the new acquisition will show up
-#   in the list on refresh — no data loss.
 _CONNECT_TIMEOUT          = 2.0
 _READ_TIMEOUT_FAST        = 15.0
 _READ_TIMEOUT_ACQUISITION = 600.0
+_READ_TIMEOUT_DOWNLOAD    = 600.0  # large dumps: 4 GB at 50 MB/s ~ 80s + slack
+
+# Streaming chunk size forwarded from requests to the client.  Matches
+# swift_client's _STREAM_CHUNK_SIZE to keep chunking aligned end-to-end.
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 class ApiClientError(RuntimeError):
@@ -46,24 +34,19 @@ class ApiClientError(RuntimeError):
 
 
 class SessionRevokedError(ApiClientError):
-    """API returned 401 — token revoked or expired."""
+    """API returned 401."""
 
 
 class ApiForbiddenError(ApiClientError):
-    """API returned 403 — forensic_analyst role missing."""
+    """API returned 403."""
 
 
 class ApiNotFoundError(ApiClientError):
-    """API returned 404 — the requested resource does not exist."""
+    """API returned 404."""
 
 
 class AcquisitionError(ApiClientError):
-    """The acquisition pipeline itself failed (libvirt/integrity/fs/other).
-
-    Distinct from ApiUnavailableError because the API replied — it just
-    replied with an error from the pipeline.  The error payload from the
-    API is preserved in .detail for diagnostic display.
-    """
+    """The acquisition pipeline itself failed (libvirt/integrity/fs/other)."""
 
     def __init__(self, message: str, detail: dict):
         super().__init__(message)
@@ -71,7 +54,7 @@ class AcquisitionError(ApiClientError):
 
 
 class ApiUnavailableError(ApiClientError):
-    """API did not respond (transport error or unexpected 5xx on GET)."""
+    """API did not respond (transport or generic 5xx on GET)."""
 
 
 # ---------------------------------------------------------------------------
@@ -79,35 +62,36 @@ class ApiUnavailableError(ApiClientError):
 # ---------------------------------------------------------------------------
 
 def list_acquisitions() -> dict:
-    """Fetch the summary listing of all acquisitions."""
     return _get("/acquisitions/")
 
 
 def get_acquisition(acquisition_id: str) -> dict:
-    """Fetch a single acquisition's full report (schema v1.1)."""
     return _get(f"/acquisitions/{acquisition_id}")
 
 
 def list_servers() -> dict:
-    """Fetch the cross-tenant list of Nova instances (FASE 5 step 2e)."""
     return _get("/servers/")
 
 
 def trigger_acquisition(instance_id: str) -> dict:
-    """Synchronously trigger a memory acquisition and return the result.
-
-    Blocks until the full pipeline (libvirt dump, hashing, Swift upload,
-    secure delete, report generation) completes on the server side.
-
-    :raises AcquisitionError: if the pipeline itself failed.
-    :raises SessionRevokedError: on 401.
-    :raises ApiForbiddenError:   on 403.
-    :raises ApiUnavailableError: on transport or generic 5xx.
-    """
     return _post(
         f"/servers/{instance_id}/memory_acquire",
         read_timeout=_READ_TIMEOUT_ACQUISITION,
     )
+
+
+def stream_dump(acquisition_id: str):
+    """Stream the dump from the API; returns (filename, content_length, chunk_iter).
+
+    Caller wraps the iterator in a Flask Response(stream_with_context) to
+    forward to the browser.
+    """
+    return _stream(f"/acquisitions/{acquisition_id}/dump")
+
+
+def stream_report(acquisition_id: str):
+    """Stream the JSON report from the API as an attachment."""
+    return _stream(f"/acquisitions/{acquisition_id}/report")
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +99,6 @@ def trigger_acquisition(instance_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _token() -> str:
-    """Pull the session's Keystone token or raise SessionRevokedError."""
     tok = session.get("keystone_token")
     if not tok:
         raise SessionRevokedError("no keystone_token in session")
@@ -123,7 +106,6 @@ def _token() -> str:
 
 
 def _raise_for_common_errors(resp, path: str) -> None:
-    """Map 401/403/404 to typed exceptions; caller handles 2xx vs 5xx."""
     if resp.status_code == 401:
         log.info("API 401 on %s — token revoked mid-session", path)
         raise SessionRevokedError("the API rejected your session token")
@@ -138,7 +120,6 @@ def _raise_for_common_errors(resp, path: str) -> None:
 
 
 def _get(path: str) -> dict:
-    """HTTP GET on the loopback API with session token; return parsed JSON."""
     url = _API_BASE.rstrip("/") + path
     headers = {"X-Auth-Token": _token()}
 
@@ -158,17 +139,11 @@ def _get(path: str) -> dict:
     _raise_for_common_errors(resp, path)
 
     if resp.status_code >= 500:
-        log.error(
-            "API returned %d on %s: %s",
-            resp.status_code, path, resp.text[:200],
-        )
+        log.error("API %d on %s: %s", resp.status_code, path, resp.text[:200])
         raise ApiUnavailableError(f"API returned HTTP {resp.status_code}")
 
     if resp.status_code >= 400:
-        log.error(
-            "API returned %d on %s: %s",
-            resp.status_code, path, resp.text[:200],
-        )
+        log.error("API %d on %s: %s", resp.status_code, path, resp.text[:200])
         raise ApiClientError(
             f"API error HTTP {resp.status_code}: {resp.text[:120]}"
         )
@@ -182,11 +157,6 @@ def _get(path: str) -> dict:
 
 
 def _post(path: str, read_timeout: float) -> dict:
-    """HTTP POST on the loopback API with extended timeout; return JSON.
-
-    On 500/502 (pipeline error) raises AcquisitionError with the API's
-    structured error detail so the UI can show a meaningful message.
-    """
     url = _API_BASE.rstrip("/") + path
     headers = {"X-Auth-Token": _token()}
 
@@ -206,7 +176,6 @@ def _post(path: str, read_timeout: float) -> dict:
     _raise_for_common_errors(resp, path)
 
     if resp.status_code in (500, 502):
-        # Pipeline-level failure — try to extract the API's JSON error body.
         try:
             detail = resp.json()
         except ValueError:
@@ -237,3 +206,75 @@ def _post(path: str, read_timeout: float) -> dict:
         raise ApiClientError(
             f"API returned non-JSON body: {resp.text[:100]}"
         ) from exc
+
+
+def _stream(path: str):
+    """Open a streaming GET on the API and return (filename, length, iter).
+
+    Uses requests' stream=True so the API response body is read lazily —
+    bytes arrive at the dashboard, are forwarded to the browser, and
+    leave memory within one chunk's lifetime.  Constant memory.
+
+    :returns: (filename, content_length_str, chunk_iterator)
+    :raises SessionRevokedError / ApiForbiddenError / ApiNotFoundError /
+            ApiUnavailableError / ApiClientError
+    """
+    url = _API_BASE.rstrip("/") + path
+    headers = {"X-Auth-Token": _token()}
+
+    log.info("STREAM GET %s", url)
+    try:
+        resp = requests.get(
+            url,
+            headers=headers,
+            stream=True,
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_DOWNLOAD),
+        )
+    except requests.exceptions.RequestException as exc:
+        log.warning("stream API unreachable: %s", exc)
+        raise ApiUnavailableError(
+            f"cannot reach forensic API: {exc}"
+        ) from exc
+
+    _raise_for_common_errors(resp, path)
+
+    if resp.status_code >= 500:
+        body = resp.text[:200]
+        resp.close()
+        log.error("API %d on stream %s: %s", resp.status_code, path, body)
+        raise ApiUnavailableError(f"API returned HTTP {resp.status_code}")
+
+    if resp.status_code >= 400:
+        body = resp.text[:200]
+        resp.close()
+        log.error("API %d on stream %s: %s", resp.status_code, path, body)
+        raise ApiClientError(
+            f"API error HTTP {resp.status_code}: {body[:120]}"
+        )
+
+    # Extract filename from Content-Disposition ('attachment; filename="..."').
+    cd = resp.headers.get("Content-Disposition", "")
+    filename = _extract_filename(cd) or "download.bin"
+    content_length = resp.headers.get("Content-Length", "")
+
+    def _iter():
+        try:
+            for chunk in resp.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    yield chunk
+        finally:
+            resp.close()
+
+    return filename, content_length, _iter()
+
+
+def _extract_filename(content_disposition: str) -> str:
+    """Parse filename from a Content-Disposition header (naive, adequate here)."""
+    if not content_disposition:
+        return ""
+    for part in content_disposition.split(";"):
+        part = part.strip()
+        if part.startswith("filename="):
+            value = part[len("filename="):].strip()
+            return value.strip('"')
+    return ""
