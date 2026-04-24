@@ -29,6 +29,22 @@
         /* Flash messages should never collapse to zero height; make sure
            they read as an alert even when the body has a single word. */
         .alert { margin-bottom: 1rem; }
+
+        /* Brand: flexbox ensures the DFIR badge is vertically centered
+           against the logo word, not baseline-aligned (which made it
+           look like it was "falling" from the text). */
+        .navbar-brand.fn-brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .navbar-brand.fn-brand .fn-badge {
+            font-size: 0.65rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            padding: 0.2em 0.55em;
+            line-height: 1;
+        }
     </style>
 
     {% block extra_head %}{% endblock %}
@@ -37,11 +53,10 @@
 
 <nav class="navbar navbar-expand-lg fn-nav mb-4">
     <div class="container">
-        <a class="navbar-brand fw-semibold" href="{{ url_for('dashboard.acquisitions_list') }}">
-            ForensicNova
-            <span class="badge text-bg-secondary ms-1 font-mono" style="font-size: 0.7rem;">
-                DFIR
-            </span>
+        <a class="navbar-brand fn-brand fw-semibold"
+           href="{{ url_for('dashboard.acquisitions_list') }}">
+            <span>ForensicNova</span>
+            <span class="badge text-bg-secondary font-mono fn-badge">DFIR</span>
         </a>
 
         {% if session.get('keystone_token') %}
