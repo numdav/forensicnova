@@ -5,7 +5,7 @@
 # Lifecycle phases wired in this file:
 #   stack pre-install   -> preinstall_forensicnova  (system packages)
 #   stack install       -> install_forensicnova     (python venv + pip deps)
-#   stack post-config   -> configure_forensicnova   (dirs, conf file, openrc)
+#   stack post-config   -> configure_forensicnova   (dirs, conf file, openrc, secret_key)
 #   stack extra         -> init_forensicnova        (keystone, swift, systemd)
 #   unstack             -> stop_forensicnova        (stop systemd unit)
 #   clean               -> cleanup_forensicnova     (remove unit + data)
@@ -44,6 +44,28 @@ forensicnova_ensure_dirs() {
         sudo chown -R "$STACK_USER:$STACK_USER" "$d"
         sudo chmod 750 "$d"
     done
+}
+
+# Generate the Flask session signing key if not already present.
+# IDEMPOTENT: preserving the existing key across ./unstack.sh + ./stack.sh
+# keeps active dashboard sessions valid (rotating the key would force all
+# logged-in analysts to re-authenticate after every restack).
+# A fresh key is generated only when the file is missing (first stack, or
+# after ./clean.sh which removes the entire work_dir).
+forensicnova_ensure_secret_key() {
+    local secret_key_file="${FORENSICNOVA_WORK_DIR}/secret_key"
+    if [[ -f "$secret_key_file" ]]; then
+        forensicnova_log "post-config" \
+            "secret_key already present at $secret_key_file — preserving existing sessions"
+    else
+        forensicnova_log "post-config" \
+            "generating new Flask secret_key at $secret_key_file"
+        openssl rand -hex 32 | sudo tee "$secret_key_file" >/dev/null
+    fi
+    # Always fix ownership and perms — belt-and-suspenders for files created
+    # manually by an operator before the plugin took over.
+    sudo chown "$STACK_USER:$STACK_USER" "$secret_key_file"
+    sudo chmod 600 "$secret_key_file"
 }
 
 # Keystone identity artifacts: role, project, user, role assignments.
@@ -176,6 +198,7 @@ forensicnova_install_python_deps() {
     "$venv_pip" install --quiet --disable-pip-version-check --upgrade pip setuptools wheel
     "$venv_pip" install --quiet --disable-pip-version-check \
         Flask \
+        Flask-WTF \
         reportlab \
         python-swiftclient \
         python-keystoneclient \
@@ -273,6 +296,7 @@ configure_forensicnova() {
         return 1
     fi
     forensicnova_ensure_dirs
+    forensicnova_ensure_secret_key
     forensicnova_write_config
     forensicnova_write_openrc
     forensicnova_log "post-config" "configuration completed successfully"

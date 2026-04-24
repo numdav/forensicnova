@@ -12,8 +12,10 @@ Design rationale:
    - No module-level side effects means safer imports from anywhere.
 
 2. Blueprints
-   - core_bp:    /health, /version (unauthenticated, root mount).
-   - api_v1_bp:  /api/v1/* (Keystone-protected, DFIR REST API).
+   - core_bp:       /health, /version    (unauthenticated, root mount).
+   - api_v1_bp:     /api/v1/*             (Keystone X-Auth-Token, token-based).
+   - dashboard_bp:  /dashboard/*          (Keystone session, cookie-based).
+                                          FASE 5 step 2b+ — not yet wired here.
 
 3. Logging
    - Dual sink: rotating file in cfg.log_dir AND stderr (journald captures
@@ -38,15 +40,36 @@ Design rationale:
      blueprint enforces auth via its own before_request hook.
    - The middleware authenticates as a service user (admin) with enough
      privilege to validate arbitrary tokens against Keystone.
+
+5. Session & CSRF — FASE 5 dashboard infrastructure
+   - SECRET_KEY is read from a file on disk (see _load_secret_key), not
+     hardcoded and not env-var based.  Rationale: the key must persist
+     across restarts (otherwise active browser sessions get invalidated
+     on every restack) and must not be visible in /proc/<pid>/environ.
+     The plugin.sh generates it at post-config time, mode 600, owned by
+     the service user.
+   - Session cookies are HttpOnly (blocks JS exfiltration) and SameSite=Lax
+     (blocks basic CSRF).  Secure=False for dev (HTTP); flip to True in
+     any HTTPS deployment.
+   - PERMANENT_SESSION_LIFETIME=8h is a reasonable analyst-shift upper bound.
+     Views that set session.permanent=True (login) activate this limit.
+   - Flask-WTF CSRFProtect is initialised globally, then the API blueprints
+     are EXEMPTED.  The API is consumed with X-Auth-Token by non-browser
+     clients (curl, scripts, the dashboard itself via loopback) — CSRF
+     tokens would break them.  Only the dashboard blueprint (added in 2b)
+     will actually be CSRF-protected, since only it consumes HTML forms
+     with cookie authentication.
 """
 from __future__ import annotations
 
 import logging
 import os
+from datetime import timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from flask import Flask
+from flask_wtf.csrf import CSRFProtect
 
 from app.config import Config, load_config
 
@@ -88,6 +111,60 @@ def _configure_logging(app: Flask, cfg: Config) -> None:
 
     app.logger.handlers = root_logger.handlers
     app.logger.setLevel(logging.INFO)
+
+
+def _load_secret_key(cfg: Config) -> bytes:
+    """Read the Flask session signing key from disk.
+
+    Fail-fast: if the file is missing, too short, or unreadable, the
+    application must not start.  A silent fallback to a random key
+    would invalidate all active dashboard sessions on every restart
+    and give no indication of misconfiguration.
+    """
+    path = cfg.secret_key_path
+    if not os.path.exists(path):
+        raise RuntimeError(
+            f"Flask secret_key file not found at {path!r}. "
+            "Generate it with: "
+            "openssl rand -hex 32 | sudo tee /var/lib/forensicnova/secret_key "
+            "&& sudo chown stack:stack /var/lib/forensicnova/secret_key "
+            "&& sudo chmod 600 /var/lib/forensicnova/secret_key. "
+            "The DevStack plugin.sh post-config phase does this automatically."
+        )
+    with open(path, "rb") as fh:
+        key = fh.read().strip()
+    if len(key) < 32:
+        raise RuntimeError(
+            f"Flask secret_key at {path!r} is too short "
+            f"({len(key)} bytes, want >= 32). Regenerate with: "
+            "openssl rand -hex 32."
+        )
+    return key
+
+
+def _configure_session(app: Flask, cfg: Config) -> None:
+    """Set SECRET_KEY and session cookie hardening flags."""
+    app.config["SECRET_KEY"] = _load_secret_key(cfg)
+
+    # Cookie hardening — HttpOnly blocks document.cookie reads from XSS;
+    # SameSite=Lax blocks CSRF from third-party form submissions.
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+    # HTTP deployment (DevStack dev): Secure=False so the browser sends
+    # the cookie over plain HTTP.  In any HTTPS deployment flip this to
+    # True to pin the cookie to TLS channels.
+    app.config["SESSION_COOKIE_SECURE"] = False
+
+    # Upper bound on a forensic analyst's logged-in session.  Views that
+    # want to activate this bound must set session.permanent = True.
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
+
+    app.logger.info(
+        "session configured: secret_key from %s (HttpOnly=True, SameSite=Lax, "
+        "Secure=False [dev HTTP], lifetime=8h)",
+        cfg.secret_key_path,
+    )
 
 
 def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
@@ -157,10 +234,20 @@ def create_app(config: Optional[Config] = None) -> Flask:
     app.config["VERSION"] = __version__
 
     _configure_logging(app, cfg)
+    _configure_session(app, cfg)
 
     from app.api import core_bp, api_v1_bp
     app.register_blueprint(core_bp)
     app.register_blueprint(api_v1_bp, url_prefix="/api/v1")
+
+    # CSRF protection — global init, then exempt the token-authenticated API
+    # blueprints.  Non-browser clients (curl, scripts, the dashboard via
+    # loopback with X-Auth-Token) must not be forced to carry a CSRF token.
+    # Only dashboard_bp (registered in step 2b) will actually be protected.
+    csrf = CSRFProtect(app)
+    csrf.exempt(core_bp)
+    csrf.exempt(api_v1_bp)
+    app.extensions["csrf"] = csrf  # store for later reference if needed
 
     _wrap_keystone_auth(app, cfg)
 
