@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Acquisitions — ForensicNova{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h2 class="mb-1">Acquisitions</h2>
+        <p class="text-body-secondary mb-0 small">
+            {% if count > 0 %}
+                {{ count }} acquisition{{ 's' if count != 1 else '' }} on record.
+            {% elif api_down %}
+                Data source unavailable.
+            {% else %}
+                No acquisitions on record yet.
+            {% endif %}
+        </p>
+    </div>
+
+    {# Trigger button — disabled until step 2e. #}
+    <span class="d-inline-block"
+          title="On-demand acquisition trigger will arrive in step 2e">
+        <button type="button"
+                class="btn btn-primary disabled"
+                tabindex="-1"
+                aria-disabled="true"
+                style="pointer-events: none;">
+            New acquisition
+        </button>
+    </span>
+</div>
+
+{% if count == 0 and not api_down %}
+
+    {# Empty state — first-time-user-ish, point them to the trigger. #}
+    <div class="card border-secondary">
+        <div class="card-body text-center py-5">
+            <p class="lead mb-2 text-body-secondary">
+                No memory acquisitions have been recorded yet.
+            </p>
+            <p class="small text-body-secondary mb-0">
+                Trigger your first acquisition via
+                <span class="font-mono">POST /api/v1/servers/&lt;id&gt;/memory_acquire</span>
+                or (soon) from the <em>New acquisition</em> button above.
+            </p>
+        </div>
+    </div>
+
+{% elif count == 0 and api_down %}
+
+    {# API down — the flash banner already carried the message; keep it terse. #}
+    <div class="card border-danger">
+        <div class="card-body text-center py-4">
+            <p class="mb-0 text-body-secondary small">
+                Unable to fetch acquisitions. See banner above for details.
+            </p>
+        </div>
+    </div>
+
+{% else %}
+
+    <div class="table-responsive">
+        <table class="table table-hover table-bordered border-secondary align-middle mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th scope="col">VM name</th>
+                    <th scope="col">Completed (UTC)</th>
+                    <th scope="col" class="text-end">Size</th>
+                    <th scope="col">MD5</th>
+                    <th scope="col">Integrity</th>
+                    <th scope="col">Operator</th>
+                    <th scope="col" class="text-end">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for acq in acquisitions %}
+                <tr>
+                    <td class="font-mono">{{ acq.vm_name or '(unknown)' }}</td>
+
+                    <td class="font-mono small">
+                        {{ (acq.completed_at or '')[:19] | replace('T', ' ') }}
+                    </td>
+
+                    <td class="text-end font-mono small">
+                        {% if acq.size_bytes %}
+                            {{ (acq.size_bytes / 1024 / 1024) | round(1) }} MB
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+
+                    <td class="font-mono small" title="{{ acq.md5 or '' }}">
+                        {% if acq.md5 %}
+                            {{ acq.md5[:12] }}…
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+
+                    <td>
+                        {% if acq.etag_verified %}
+                            <span class="badge text-bg-success">verified</span>
+                        {% else %}
+                            <span class="badge text-bg-danger">unverified</span>
+                        {% endif %}
+                    </td>
+
+                    <td class="font-mono small">{{ acq.operator or '—' }}</td>
+
+                    <td class="text-end">
+                        {# Detail page arrives in step 2d — link disabled for now. #}
+                        <span class="d-inline-block"
+                              title="Detail page arrives in step 2d">
+                            <a class="btn btn-sm btn-outline-secondary disabled"
+                               tabindex="-1"
+                               aria-disabled="true"
+                               style="pointer-events: none;"
+                               href="#">
+                                View
+                            </a>
+                        </span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+{% endif %}
+
+{% endblock %}

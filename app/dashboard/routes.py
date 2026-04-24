@@ -1,13 +1,18 @@
 """ForensicNova dashboard — HTTP route handlers.
 
 Routes:
-  GET  /dashboard/         -> home (login required) — FASE 5 step 2b placeholder
+  GET  /dashboard/         -> acquisitions list (login required) — the home
   GET  /dashboard/login    -> render login form
   POST /dashboard/login    -> validate form, auth to Keystone, set session
   GET  /dashboard/logout   -> revoke Keystone token, clear session
 
-The blueprint uses its own templates/ folder, isolated from any other
-template search path.  See app/dashboard/__init__.py for rationale.
+Error handling — blueprint-level, centralized:
+  SessionRevokedError  -> clear session + flash + redirect to /login
+  ApiUnavailableError  -> flash banner + render page with empty data, HTTP 503
+
+The error handlers live on the blueprint, so any view can raise the
+typed exceptions (via api_client) without try/except — Flask routes the
+exception to the right handler automatically.
 """
 from __future__ import annotations
 
@@ -21,6 +26,11 @@ from flask import (
     url_for,
 )
 
+from app.dashboard.api_client import (
+    ApiUnavailableError,
+    SessionRevokedError,
+    list_acquisitions,
+)
 from app.dashboard.decorators import login_required
 from app.dashboard.forms import LoginForm
 from app.dashboard.keystone_auth import (
@@ -37,14 +47,62 @@ dashboard_bp = Blueprint(
 
 
 # ---------------------------------------------------------------------------
-# GET /dashboard/
+# Blueprint-level error handlers
+# ---------------------------------------------------------------------------
+
+@dashboard_bp.errorhandler(SessionRevokedError)
+def _handle_session_revoked(exc: SessionRevokedError):
+    """Token was rejected mid-session — clear cookie and redirect to login."""
+    current_app.logger.info(
+        "session revoked mid-request: user=%s",
+        session.get("username", "unknown"),
+    )
+    session.clear()
+    flash(
+        "Your authentication was revoked. Please sign in again.",
+        "warning",
+    )
+    return redirect(url_for("dashboard.login"))
+
+
+@dashboard_bp.errorhandler(ApiUnavailableError)
+def _handle_api_unavailable(exc: ApiUnavailableError):
+    """Loopback API is down — render the page frame with empty data."""
+    current_app.logger.error("api unavailable: %s", exc)
+    flash(
+        "The forensic API is temporarily unavailable. "
+        "Try again in a moment.",
+        "danger",
+    )
+    # Keep the UI shell usable — the navbar and logout still work,
+    # only the data section renders empty.
+    return render_template(
+        "acquisitions_list.html",
+        acquisitions=[],
+        count=0,
+        api_down=True,
+    ), 503
+
+
+# ---------------------------------------------------------------------------
+# GET /dashboard/   — acquisitions list (home)
 # ---------------------------------------------------------------------------
 
 @dashboard_bp.route("/")
 @login_required
-def home():
-    """Post-login landing page (placeholder for FASE 5 step 2c)."""
-    return render_template("home.html")
+def acquisitions_list():
+    """Home — table of all acquisitions.
+
+    Feeds from GET /api/v1/acquisitions/ via the loopback client.
+    Exceptions propagate to the blueprint errorhandlers above — no try/except.
+    """
+    result = list_acquisitions()
+    return render_template(
+        "acquisitions_list.html",
+        acquisitions=result.get("acquisitions", []),
+        count=result.get("count", 0),
+        api_down=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +115,7 @@ def login():
     """Render login form on GET; validate and issue a session on POST."""
     # Already logged in? Redirect to home instead of showing login again.
     if "keystone_token" in session:
-        return redirect(url_for("dashboard.home"))
+        return redirect(url_for("dashboard.acquisitions_list"))
 
     form = LoginForm()
 
@@ -106,7 +164,7 @@ def login():
             claims["username"], claims["project_name"],
         )
         flash(f"Welcome, {claims['username']}.", "success")
-        return redirect(url_for("dashboard.home"))
+        return redirect(url_for("dashboard.acquisitions_list"))
 
     return render_template("login.html", form=form)
 
