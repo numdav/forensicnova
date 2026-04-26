@@ -98,15 +98,14 @@ These guarantees address the forensic chain from the moment RAM is read off the 
                           └─────────────────────┘
 ```
 
-**Pipeline stages** (sequential, all logged to chain of custody):
+**Pipeline stages.** The acquisition is composed of six functional stages, plus a cross-cutting **chain of custody** that records each meaningful sub-event throughout the run. CoC events are persisted to `/var/log/forensicnova/chain-of-custody.jsonl` (append-only) and embedded in the final JSON report.
 
-1. `acquire_memory` — libvirt `coreDumpWithFormat()` writes raw memory to the staging directory
-2. `compute_hashes` — MD5 and SHA-1 computed in streaming
-3. `collect_metadata` — Nova + Glance + libvirt XML consolidated in `target_system` block
-4. `upload_dump` — Swift `PUT`, response etag compared to local MD5
-5. `secure_delete` — `shred -u -n 1` on the staging file (only if etag verified)
+1. `acquire_memory` — libvirt `coreDumpWithFormat()` writes raw memory to the per-acquisition staging directory
+2. `compute_hashes` — MD5 + SHA-1 computed in a single streaming pass (64 KB chunks, O(1) RAM)
+3. `collect_metadata` — Nova + Glance + libvirt XML consolidated in the `target_system` block
+4. `upload_dump` — Swift `PUT`, response ETag compared to the local MD5
+5. `secure_delete` — `shred -u -n 1` on the staging file (only if ETag verified)
 6. `upload_report` — JSON report (schema v1.1) published to Swift next to the dump
-7. `emit_coc_event` — final chain-of-custody entry sealing the acquisition
 
 ---
 
@@ -121,7 +120,7 @@ These guarantees address the forensic chain from the moment RAM is read off the 
 
 ### `local.conf` snippet
 
-Add the following to your DevStack `local.conf`:
+The minimal lines needed to enable ForensicNova on top of an existing DevStack `local.conf`. For a fully-commented working example see [`local.conf.example`](local.conf.example) at the root of this repository.
 
 ```ini
 [[local|localrc]]
@@ -131,12 +130,17 @@ RABBIT_PASSWORD=$ADMIN_PASSWORD
 SERVICE_PASSWORD=$ADMIN_PASSWORD
 
 HOST_IP=<your-host-ip>
-SERVICE_HOST=<your-host-ip>
+SERVICE_HOST=$HOST_IP
+MYSQL_HOST=$SERVICE_HOST
+RABBIT_HOST=$SERVICE_HOST
+GLANCE_HOSTPORT=$SERVICE_HOST:9292
 
+# Cinder off, Swift on (forensic artifacts live in object storage)
 disable_service cinder c-api c-sch c-vol
 enable_service s-proxy s-object s-container s-account
-SWIFT_HASH=forensicnova_dev_hash
+SWIFT_HASH=change_me_to_a_random_string
 SWIFT_REPLICAS=1
+SWIFT_DATA_DIR=/opt/stack/data/swift
 
 LIBVIRT_TYPE=kvm
 
@@ -145,7 +149,7 @@ FORENSICNOVA_DFIR_PASSWORD=<your-dfir-password>
 enable_plugin forensicnova https://github.com/numdav/forensicnova main
 ```
 
-Replace `<your-dfir-password>` with the password you want to assign to the `dfir-tester` user. Replace `<your-host-ip>` with the IP address of your DevStack host.
+Replace `<your-dfir-password>` with the password you want to assign to the `dfir-tester` user. Replace `<your-host-ip>` with the IP address of your DevStack host. Set `SWIFT_HASH` to any random string of your choice — it must be stable across reboots of the same deployment.
 
 ### Stack and validate
 
@@ -268,47 +272,121 @@ curl -s \
 
 ### JSON report schema (v1.1)
 
+The report below mirrors the actual output produced by `app/reports/json_report.py`. UTC timestamps are emitted with microsecond precision (`.%f`); fields that the underlying OpenStack APIs do not advertise (e.g. `os_distro` for CirrOS images) are reported as `null`.
+
 ```jsonc
 {
   "schema_version": "1.1",
   "acquisition_id": "<uuid4>",
+  "operator":       "dfir-tester",
+  "tool": {
+    "name":    "ForensicNova",
+    "version": "0.1.0"
+  },
   "timestamps": {
-    "started_at": "2026-04-24T18:25:49Z",
-    "completed_at": "2026-04-24T18:25:57Z",
+    "started_at":       "2026-04-24T18:25:49.000000Z",
+    "completed_at":     "2026-04-24T18:25:57.120000Z",
     "duration_seconds": 8.12
   },
   "instance": {
-    "nova_uuid": "<nova-instance-uuid>",
-    "name": "<vm-name>",
-    "libvirt_domain": "instance-00000042"
+    "id":     "<nova-instance-uuid>",
+    "name":   "<vm-name>",
+    "domain": "instance-00000042"
   },
   "target_system": {
-    "os_type": "linux",
-    "architecture": "x86_64",
-    "memory_mb": 2048,
-    "cpu_model": "qemu64",
-    "image_name": "cirros-0.6.3-x86_64-disk",
-    "flavor_name": "ds2G"
+    "nova": {
+      "id":     "<nova-instance-uuid>",
+      "name":   "<vm-name>",
+      "status": "ACTIVE",
+      "created": "2026-04-20T10:00:00Z",
+      "host":   "<compute-host>",
+      "hypervisor_hostname": "<compute-host>"
+    },
+    "flavor": {
+      "id":      "<flavor-id>",
+      "name":    "ds2G",
+      "ram_mb":  2048,
+      "vcpus":   1,
+      "disk_gb": 20
+    },
+    "glance": {
+      "id":             "<image-id>",
+      "name":           "cirros-0.6.3-x86_64-disk",
+      "disk_format":    "qcow2",
+      "container_format": "bare",
+      "os_type":        null,
+      "os_distro":      null,
+      "os_version":     null,
+      "architecture":   null,
+      "hw_machine_type": null
+    },
+    "hypervisor": { "type": "kvm" },
+    "libvirt": {
+      "domain_name":  "instance-00000042",
+      "architecture": "x86_64",
+      "machine_type": "pc-q35-9.0",
+      "memory_kib":   2097152,
+      "memory_mb":    2048,
+      "vcpus":        1,
+      "cpu_mode":     "host-model"
+    }
   },
   "dump": {
-    "size_bytes": 2147483648,
-    "md5":  "<hex>",
-    "sha1": "<hex>",
-    "swift_object": "dump-<sanitized_vm_name>-<UTC>.raw",
-    "swift_etag":   "<hex>",
-    "etag_verified": true
+    "size_bytes":         2147483648,
+    "md5":                "<hex>",
+    "sha1":               "<hex>",
+    "swift_object":       "forensics/dump-<sanitized_vm_name>-<UTC>.raw",
+    "swift_etag":         "<hex>",
+    "etag_verified":      true,
+    "format":             "raw",
+    "acquisition_method": "libvirt-coreDumpWithFormat"
   },
   "report": {
-    "swift_object": "report-<sanitized_vm_name>-<UTC>.json"
+    "swift_object": "forensics/report-<sanitized_vm_name>-<UTC>.json",
+    "filename":     "report-<sanitized_vm_name>-<UTC>.json"
   },
-  "chain_of_custody": [
-    { "seq": 1, "event": "acquire_memory.started",  "ts": "..." },
-    { "seq": 2, "event": "acquire_memory.completed", "ts": "...", "details": { "bytes_written": 2147483648 } },
-    { "seq": 3, "event": "compute_hashes.completed", "ts": "...", "details": { "md5": "...", "sha1": "..." } },
-    { "seq": 4, "event": "upload_dump.completed",   "ts": "...", "details": { "etag_verified": true } },
-    { "seq": 5, "event": "secure_delete.completed", "ts": "..." },
-    { "seq": 6, "event": "upload_report.completed", "ts": "..." }
-  ]
+  "chain_of_custody": {
+    "total_events": 11,
+    "events": [
+      {
+        "seq":         1,
+        "event_type":  "api_request_received",
+        "description": "REST endpoint received the acquisition request",
+        "timestamp":   "2026-04-24T18:25:49.123456Z",
+        "data": {
+          "instance_id":    "<nova-instance-uuid>",
+          "endpoint":       "memory_acquire",
+          "client_address": "192.0.2.10"
+        }
+      },
+      {
+        "seq":         5,
+        "event_type":  "hashing_completed",
+        "description": "Hashes computed (single-pass, 64 KB chunks)",
+        "timestamp":   "2026-04-24T18:25:53.456789Z",
+        "data": {
+          "size_bytes":       2147483648,
+          "md5":              "<hex>",
+          "sha1":             "<hex>",
+          "duration_seconds": 3.45
+        }
+      },
+      {
+        "seq":         8,
+        "event_type":  "swift_upload_verified",
+        "description": "Swift ETag matches local MD5 — integrity confirmed",
+        "timestamp":   "2026-04-24T18:25:55.789012Z",
+        "data": {
+          "object_name": "dump-<sanitized_vm_name>-<UTC>.raw",
+          "container":   "forensics",
+          "etag":        "<hex>",
+          "md5":         "<hex>",
+          "size_bytes":  2147483648
+        }
+      }
+      // ... events 2–4, 6–7, 9–11 elided for brevity
+    ]
+  }
 }
 ```
 
@@ -343,9 +421,13 @@ openstack \
 
 ### Chain of custody: sample line
 
+A real line from `/var/log/forensicnova/chain-of-custody.jsonl`. The format is one self-contained JSON object per line, with the schema enforced by `app/reports/chain_of_custody.py`. Fields: `acquisition_id`, `operator`, `event_type` (snake_case), `timestamp` (ISO-8601 UTC with microseconds, `Z` suffix), and a free-form `data` object whose shape depends on the event.
+
 ```jsonl
-{"seq":4,"ts":"2026-04-24T18:25:55Z","acquisition_id":"a3f2...","event":"upload_dump.completed","details":{"swift_object":"dump-suspected-web-01-20260424T182549Z.raw","size_bytes":2147483648,"etag_verified":true,"md5_local":"ab12...","md5_swift":"ab12..."}}
+{"acquisition_id":"a3f2c1d0-1234-5678-9abc-def012345678","operator":"dfir-tester","event_type":"swift_upload_verified","timestamp":"2026-04-24T18:25:55.789012Z","data":{"object_name":"dump-suspected-web-01-20260424T182549Z.raw","container":"forensics","etag":"ab12cd34ef56...","md5":"ab12cd34ef56...","size_bytes":2147483648}}
 ```
+
+The `seq`, `description` and per-event human-readable context are added by `json_report.py` only when the events are folded into the final report; the on-disk JSONL is the raw event stream and is intentionally minimal.
 
 ---
 
@@ -373,6 +455,12 @@ DevStack occasionally leaves or duplicates `swift.img` loop-mount entries in `/e
 
 Acquisitions are executed synchronously and the dashboard waits for completion. For very large guests (>4 GB of RAM) or slow storage, a browser may close the connection before the pipeline finishes. The server-side pipeline completes regardless and the acquisition appears in the list on refresh. A thesis roadmap item refactors this into an async job with a real progress bar.
 
+### Single-PUT upload threshold (≥ 4 GB RAM rejected)
+
+The dump uploader in `app/storage/swift_client.py` performs a single Swift `PUT` per acquisition and enforces a hard cap of `SIMPLE_UPLOAD_THRESHOLD = 4 GiB` on the source file. Acquisitions whose RAM image meets or exceeds that size raise `NotImplementedError` before contacting Swift, with the local dump preserved.
+
+In practice this means VMs configured with **≥ 4 GB of RAM** are not acquirable by the prototype. The choice is conservative: Swift itself accepts single PUTs up to 5 GiB and supports arbitrary sizes via Swift Large Object (SLO/DLO). SLO support is on the thesis roadmap. Demo VMs are sized at 2 GB RAM, well within the threshold.
+
 ### O(N) listing over Swift
 
 The `/api/v1/acquisitions/` endpoint scans all `report-*.json` objects in the container and parses them. This is adequate for hundreds of acquisitions. At thousands, an index based on Swift custom metadata (`X-Object-Meta-Acquisition-Id`) or a dedicated SQL index is required (thesis).
@@ -393,6 +481,7 @@ The prototype is the baseline for the M.Sc. thesis. Planned incremental work, bu
 - **Unified incident timeline** — cross-correlation between RAM findings and OpenStack service logs (Nova, Keystone, Neutron) to reconstruct attack sequences against a compromised VM.
 - **Cumulative signed PDF report** — on-demand generation of a PDF bundling multiple acquisitions, with operator name signature, QR-encoded hashes, and a deterministic cover sheet for legal hand-off.
 - **Streaming acquisition (Scenario B, zero persistent footprint)** — dedicated thesis chapter benchmarking a `libvirt → pipe → hasher → Swift` streaming pipeline against the current staging-based Scenario A+, with trade-off analysis and measured performance.
+- **Swift Large Object (SLO) support** — replacing the 4 GiB single-PUT cap with segmented uploads so guests of arbitrary RAM size can be acquired.
 - **Nova `policy.yaml` override** — replacing the pragmatic cross-tenant `admin` grant with a least-privilege, read-only `forensic_analyst` policy.
 - **Horizon panel integration** — optional integration of the dashboard as a Horizon panel for unified OpenStack operator experience.
 
