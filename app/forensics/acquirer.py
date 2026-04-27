@@ -108,7 +108,7 @@ def acquire_memory(
             "domain_name": domain_name,
         })
 
-        # Verify domain is RUNNING (virsh dump fails on SHUTOFF)
+        # Verify domain is RUNNING (coreDumpWithFormat fails on SHUTOFF).
         state, _ = domain.state()
         if state != libvirt.VIR_DOMAIN_RUNNING:
             state_name = _domain_state_name(state)
@@ -134,12 +134,12 @@ def acquire_memory(
         )
 
         # ------------------------------------------------------------------
-        # Dump RAM via libvirt coreDumpWithFormat
+        # Dump RAM via libvirt coreDumpWithFormat.
         #   Equivalent CLI: virsh dump <domain> <path> --memory-only --format raw
         #   libvirtd writes the file as root:root (QEMU driver runs privileged).
         # ------------------------------------------------------------------
-        log.info("virsh dump starting: domain=%s -> %s", domain_name, dump_path)
-        _emit(log_event, "virsh_dump_started", {
+        log.info("memory dump starting: domain=%s -> %s", domain_name, dump_path)
+        _emit(log_event, "memory_dump_started", {
             "domain_name": domain_name,
             "dump_path": str(dump_path),
             "estimated_bytes": estimated_bytes,
@@ -156,10 +156,10 @@ def acquire_memory(
         actual_bytes = os.stat(str(dump_path)).st_size
 
         log.info(
-            "virsh dump completed: size=%d bytes (%.1f MB), duration=%.1fs",
+            "memory dump completed: size=%d bytes (%.1f MB), duration=%.1fs",
             actual_bytes, actual_bytes / 1024 / 1024, duration,
         )
-        _emit(log_event, "virsh_dump_completed", {
+        _emit(log_event, "memory_dump_completed", {
             "domain_name": domain_name,
             "dump_path": str(dump_path),
             "file_size_bytes": actual_bytes,
