@@ -2,7 +2,7 @@
 
 Computes MD5 and SHA-1 over an arbitrarily large file in a single I/O pass,
 using fixed-size chunks so that RAM consumption is O(1) regardless of the
-dump size (tested up to 32 GB guest RAM in the thesis scenario).
+dump size.
 
 Design decisions:
 - Single pass: both hash objects are updated in the same read loop.
