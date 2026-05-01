@@ -1,6 +1,6 @@
 """ForensicNova — hypervisor-level RAM acquisition via libvirt.
 
-Implements Scenario A+ ("hypervisor-local staging"):
+Implements Scenario ("hypervisor-local staging"):
   1. Connect to libvirt on the local compute node (qemu:///system).
   2. Resolve the Nova instance UUID to a libvirt domain object.
   3. Pre-check available disk space against the domain's declared max RAM.
