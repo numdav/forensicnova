@@ -4,7 +4,7 @@ Produces the machine-readable report that travels with the dump as a
 second Swift object and that the SIFT workstation consumes for
 hash verification and analysis routing.
 
-Schema v1.1 (FASE 4 final):
+Schema v1.1:
 
   {
     "schema_version": "1.1",
