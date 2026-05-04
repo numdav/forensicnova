@@ -11,13 +11,11 @@ Two blueprint families live here:
               Protected by keystonemiddleware (auth_token) wired around the
               Flask WSGI app, plus a per-blueprint before_request hook in
               app/api/v1.py that enforces the forensic_analyst role.
-              Endpoints (FASE 4):
-                POST /api/v1/servers/<instance_id>/memory_acquire
-              Endpoints planned for FASE 5+:
-                GET  /api/v1/acquisitions/
-                GET  /api/v1/acquisitions/<acq_id>
-                GET  /api/v1/acquisitions/<acq_id>/report.pdf
-                GET  /api/v1/acquisitions/<acq_id>/report.json
+              POST /api/v1/servers/<instance_id>/memory_acquire
+              GET  /api/v1/acquisitions/
+              GET  /api/v1/acquisitions/<acq_id>
+              GET  /api/v1/acquisitions/<acq_id>/report.pdf
+              GET  /api/v1/acquisitions/<acq_id>/report.json
 """
 from __future__ import annotations
 
