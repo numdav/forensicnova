@@ -6,15 +6,15 @@ Invoked by the systemd unit `devstack@forensicnova.service` via:
 
 The module exposes:
     app     : Flask     — the WSGI application object (for gunicorn
-                          in FASE 4, which will call `app.wsgi:app`).
-    main()  : None      — dev-server entry point used in FASE 3.
+                          which will call `app.wsgi:app`).
+    main()  : None      — dev-server entry point.
 
-Why the Flask dev server in FASE 3:
+Why the Flask dev server:
 - Only endpoint is /health; zero concurrency concerns.
 - Zero extra dependencies beyond Flask itself.
 - Minimal moving parts = easier demo and oral defense.
 
-FASE 4 migration path (already decided, no refactor needed):
+migration path (already decided, no refactor needed):
     ExecStart=/opt/stack/forensicnova/.venv/bin/gunicorn \\
         --bind <host>:<port> --workers 2 app.wsgi:app
 The `app` symbol exported here is already gunicorn-ready.
