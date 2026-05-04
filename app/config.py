@@ -7,7 +7,7 @@ a Config dataclass consumed by the Flask application factory.
 INI sections handled:
     [DEFAULT]            runtime / bind
     [keystone]           identity discovery (auth_url, region, role)
-    [keystone_authtoken] service credentials for keystonemiddleware (FASE 4)
+    [keystone_authtoken] service credentials for keystonemiddleware
     [swift]              object storage container name
     [forensics]          DFIR project context
     [libvirt]            hypervisor connection URI
