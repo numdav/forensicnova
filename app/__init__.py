@@ -40,7 +40,7 @@ Design rationale:
    - The middleware authenticates as a service user (admin) with enough
      privilege to validate arbitrary tokens against Keystone.
 
-5. Session & CSRF — FASE 5 dashboard infrastructure
+5. Session & CSRF — dashboard infrastructure
    - SECRET_KEY is read from a file on disk (see _load_secret_key), not
      hardcoded and not env-var based.  Rationale: the key must persist
      across restarts (otherwise active browser sessions get invalidated
