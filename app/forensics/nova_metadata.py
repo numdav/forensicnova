@@ -19,7 +19,7 @@ still auto-detect OS from the dump; this block is the "best guess hint"
 that comes FROM OpenStack, useful especially for thesis-scope Windows VMs
 where the Glance image typically has os_type=windows / os_distro=win10.
 
-FASE 5 addition — list_all_servers():
+List_all_servers():
   Cross-tenant enumeration of all Nova instances, used by the dashboard
   "New acquisition" dropdown.  Requires dfir-tester to have the 'admin'
   role on every project (granted by devstack/plugin.sh at stack time).
