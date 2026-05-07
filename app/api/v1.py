@@ -17,7 +17,7 @@ Endpoints:
   GET  /acquisitions/<acquisition_id>/dump     — download .raw dump (streaming)
   GET  /acquisitions/<acquisition_id>/report   — download .json report
 
-Pipeline ordering (FASE 4 final):
+Pipeline ordering:
   1. acquire_memory         (libvirt dump, chown, staging)
   2. compute_hashes         (MD5 + SHA1 streaming)
   3. nova_metadata.collect  (Nova + Glance + libvirt XML)
