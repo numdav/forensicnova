@@ -473,7 +473,7 @@ After a reboot of the hypervisor, Nova reports guests as `SHUTOFF` by default (`
 
 ## Thesis roadmap
 
-The prototype is the baseline for the M.Sc. thesis. Planned incremental work, building on top of the current FASE 5 without breaking changes:
+The prototype is the baseline for the M.Sc. thesis. Planned incremental work, building on top of the current without breaking changes:
 
 - **Volatility 3 IOC extraction** — on-demand analysis of Windows RAM dumps stored in Swift: hidden processes, active network connections, injected DLLs, LSASS credential material. Findings attached to the JSON report as a new `analysis.volatility` section.
 - **YARA scanning** — signature-based triage of RAM dumps against known malware families and custom threat-actor rules, feeding into the same `analysis` section of the report.
