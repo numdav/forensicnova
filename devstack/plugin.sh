@@ -308,7 +308,7 @@ init_forensicnova() {
     forensicnova_ensure_container
     forensicnova_install_systemd_unit
     forensicnova_start_service
-    forensicnova_log "extra" "FASE init completed"
+    forensicnova_log "extra" "init completed"
 }
 
 stop_forensicnova() {
