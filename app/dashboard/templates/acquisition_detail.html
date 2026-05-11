@@ -51,7 +51,8 @@
                 <strong class="d-block">Export forensic artifacts</strong>
                 <span class="small text-body-secondary">
                     The .raw dump feeds Volatility 3 / Autopsy;
-                    the .json report is the chain-of-custody record.
+                    the .json report is the chain-of-custody record;
+                    the .pdf report is the printable verbal for legal hand-off.
                 </span>
             </div>
             <a class="btn btn-primary"
@@ -63,6 +64,11 @@
                href="{{ url_for('dashboard.download_report',
                                 acquisition_id=report.acquisition_id) }}">
                 Download report (.json)
+            </a>
+            <a class="btn btn-success"
+               href="{{ url_for('dashboard.download_pdf',
+                                acquisition_id=report.acquisition_id) }}">
+                Download report (.pdf)
             </a>
         </div>
     </div>

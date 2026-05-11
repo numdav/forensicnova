@@ -10,14 +10,15 @@ Authentication contract:
         "forensic_analyst" in X_ROLES     else 403
 
 Endpoints:
-  POST /servers/<instance_id>/memory_acquire   — trigger acquisition pipeline
-  GET  /servers/                               — list all Nova instances
-  GET  /acquisitions/                          — list all acquisitions (summary)
-  GET  /acquisitions/<acquisition_id>          — full report for one acquisition
-  GET  /acquisitions/<acquisition_id>/dump     — download .raw dump (streaming)
-  GET  /acquisitions/<acquisition_id>/report   — download .json report
+  POST /servers/<instance_id>/memory_acquire     — trigger acquisition pipeline
+  GET  /servers/                                 — list all Nova instances
+  GET  /acquisitions/                            — list all acquisitions (summary)
+  GET  /acquisitions/<acquisition_id>            — full report for one acquisition
+  GET  /acquisitions/<acquisition_id>/dump       — download .raw dump (streaming)
+  GET  /acquisitions/<acquisition_id>/report     — download .json report
+  GET  /acquisitions/<acquisition_id>/report.pdf — download rendered PDF (on demand)
 
-Pipeline ordering:
+Pipeline ordering (memory_acquire):
   1. acquire_memory         (libvirt dump, chown, staging)
   2. compute_hashes         (MD5 + SHA1 streaming)
   3. nova_metadata.collect  (Nova + Glance + libvirt XML)
@@ -45,6 +46,7 @@ from app.forensics import nova_metadata
 from app.hashing.hasher import compute_hashes
 from app.reports.chain_of_custody import ChainOfCustody
 from app.reports.json_report import generate_report, serialize_report
+from app.reports.pdf_report import ForensicPdfReport
 from app.storage.swift_client import (
     IntegrityError,
     SwiftObjectNotFound,
@@ -383,6 +385,7 @@ def get_acquisition(acquisition_id: str):
 # ---------------------------------------------------------------------------
 # GET /acquisitions/<acquisition_id>/dump     — streaming download .raw
 # GET /acquisitions/<acquisition_id>/report   — download .json
+# GET /acquisitions/<acquisition_id>/report.pdf — rendered PDF on demand
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/acquisitions/<acquisition_id>/dump", methods=["GET"])
@@ -492,6 +495,72 @@ def download_acquisition_report(acquisition_id: str):
     )
 
 
+@api_v1_bp.route("/acquisitions/<acquisition_id>/report.pdf", methods=["GET"])
+def download_acquisition_report_pdf(acquisition_id: str):
+    """Render and serve a PDF version of the JSON report on demand.
+
+    The PDF is generated fresh from the canonical JSON report at every call.
+    It is NOT persisted on Swift — the JSON remains the single source of
+    truth, the PDF is a derived view intended for legal hand-off and
+    operator countersignature.
+
+    Each generation produces a byte-different PDF (CreationDate moves), so
+    the document can be archived as a distinct print event with a
+    verifiable timestamp.
+    """
+    cfg = current_app.config["FORENSICNOVA"]
+    operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
+
+    log.info(
+        "download_pdf: acq_id=%s operator=%s",
+        acquisition_id, operator,
+    )
+
+    report = _find_report_by_acquisition_id(acquisition_id, cfg)
+    if report is None:
+        return jsonify(
+            error="not_found",
+            detail=f"no acquisition found with id {acquisition_id}",
+        ), 404
+
+    # Derive the PDF filename from the JSON filename, swapping the suffix
+    # (report-<vm>-<ts>.json -> report-<vm>-<ts>.pdf). The self-reference
+    # block of the report is the authoritative source for the JSON name.
+    report_block = report.get("report") or {}
+    json_filename = (
+        report_block.get("filename") or f"report-{acquisition_id}.json"
+    )
+    if json_filename.endswith(".json"):
+        pdf_filename = json_filename[:-5] + ".pdf"
+    else:
+        pdf_filename = json_filename + ".pdf"
+
+    try:
+        pdf_bytes = ForensicPdfReport(report).render()
+    except Exception as exc:
+        log.exception("PDF rendering failed for acq=%s", acquisition_id)
+        return jsonify(
+            error="pdf_render_failed",
+            detail=str(exc),
+            acquisition_id=acquisition_id,
+        ), 500
+
+    log.info(
+        "download_pdf: served %s (%d bytes) to operator=%s",
+        pdf_filename, len(pdf_bytes), operator,
+    )
+
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={
+            "Content-Disposition":     f'attachment; filename="{pdf_filename}"',
+            "Content-Length":          str(len(pdf_bytes)),
+            "X-Content-Type-Options":  "nosniff",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -499,8 +568,8 @@ def download_acquisition_report(acquisition_id: str):
 def _find_report_by_acquisition_id(acquisition_id: str, cfg):
     """Scan Swift report-*.json and return the parsed report matching the id.
 
-    Shared between GET /acquisitions/<id>, /dump, and /report.  See the
-    thesis optimization note in the original list_acquisitions docstring.
+    Shared between GET /acquisitions/<id>, /dump, /report and /report.pdf.
+    See the thesis optimization note in the original list_acquisitions docstring.
     """
     try:
         report_names = list_reports(cfg)
@@ -560,7 +629,7 @@ def _build_summary(report: dict, object_name: str) -> dict:
         "duration_seconds": timestamps.get("duration_seconds"),
         "size_bytes":       dump.get("size_bytes"),
         "md5":              dump.get("md5"),
-        "sha1":             dump.get("sha1"),
+        "sha1":              dump.get("sha1"),
         "etag_verified":    dump.get("etag_verified"),
         "swift_dump":       dump.get("swift_object"),
         "swift_report":     report_blk.get("swift_object"),

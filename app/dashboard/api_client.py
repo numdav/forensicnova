@@ -94,6 +94,16 @@ def stream_report(acquisition_id: str):
     return _stream(f"/acquisitions/{acquisition_id}/report")
 
 
+def download_pdf(acquisition_id: str):
+    """Fetch the rendered PDF report from the API in one shot.
+
+    Unlike dumps, PDFs are small (tens of KB) and built in-memory by the
+    API on each call, so streaming brings no benefit. Plain GET, return
+    (filename, bytes).
+    """
+    return _get_binary(f"/acquisitions/{acquisition_id}/report.pdf")
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -154,6 +164,45 @@ def _get(path: str) -> dict:
         raise ApiClientError(
             f"API returned non-JSON body: {resp.text[:100]}"
         ) from exc
+
+
+def _get_binary(path: str):
+    """GET a binary attachment from the API; return (filename, bytes).
+
+    Consumes the full body in memory; intended for small artefacts only
+    (PDFs, JSON reports). For multi-GB dumps use _stream() instead.
+    """
+    url = _API_BASE.rstrip("/") + path
+    headers = {"X-Auth-Token": _token()}
+
+    log.info("GET binary %s", url)
+    try:
+        resp = requests.get(
+            url,
+            headers=headers,
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_FAST),
+        )
+    except requests.exceptions.RequestException as exc:
+        log.warning("loopback API unreachable: %s", exc)
+        raise ApiUnavailableError(
+            f"cannot reach forensic API: {exc}"
+        ) from exc
+
+    _raise_for_common_errors(resp, path)
+
+    if resp.status_code >= 500:
+        log.error("API %d on %s: %s", resp.status_code, path, resp.text[:200])
+        raise ApiUnavailableError(f"API returned HTTP {resp.status_code}")
+
+    if resp.status_code >= 400:
+        log.error("API %d on %s: %s", resp.status_code, path, resp.text[:200])
+        raise ApiClientError(
+            f"API error HTTP {resp.status_code}: {resp.text[:120]}"
+        )
+
+    cd = resp.headers.get("Content-Disposition", "")
+    filename = _extract_filename(cd) or "download.bin"
+    return filename, resp.content
 
 
 def _post(path: str, read_timeout: float) -> dict:

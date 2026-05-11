@@ -19,6 +19,7 @@ from app.dashboard.api_client import (
     ApiNotFoundError,
     ApiUnavailableError,
     SessionRevokedError,
+    download_pdf as api_download_pdf,
     get_acquisition,
     list_acquisitions,
     list_servers,
@@ -142,6 +143,7 @@ def acquisition_detail(acquisition_id: str):
 # ---------------------------------------------------------------------------
 # GET /dashboard/acquisitions/<id>/download_dump
 # GET /dashboard/acquisitions/<id>/download_report
+# GET /dashboard/acquisitions/<id>/download_pdf
 # ---------------------------------------------------------------------------
 
 @dashboard_bp.route("/acquisitions/<acquisition_id>/download_dump")
@@ -189,6 +191,32 @@ def download_report(acquisition_id: str):
         stream_with_context(chunks),
         mimetype="application/json",
         headers=headers,
+    )
+
+
+@dashboard_bp.route("/acquisitions/<acquisition_id>/download_pdf")
+@login_required
+def download_pdf(acquisition_id: str):
+    """Fetch the rendered PDF report from the API and serve it to the browser.
+
+    The PDF is built fresh by the API on every call (small payload, in-memory),
+    so the dashboard simply forwards the bytes with the right content-type
+    and disposition headers.
+    """
+    current_app.logger.info(
+        "dashboard download_pdf: user=%s acq=%s",
+        session.get("username", "unknown"), acquisition_id,
+    )
+    filename, pdf_bytes = api_download_pdf(acquisition_id)
+
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={
+            "Content-Disposition":     f'attachment; filename="{filename}"',
+            "Content-Length":          str(len(pdf_bytes)),
+            "X-Content-Type-Options":  "nosniff",
+        },
     )
 
 
