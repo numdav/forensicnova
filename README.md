@@ -142,6 +142,11 @@ SWIFT_HASH=change_me_to_a_random_string
 SWIFT_REPLICAS=1
 SWIFT_DATA_DIR=/opt/stack/data/swift
 
+# Size the Swift loopback to accommodate forensic dumps + their SLO segments.
+# The DevStack default (~6 GB) is too small for any acquisition above 4 GB
+# of RAM. 30 GB gives room for several acquisitions of an 8 GiB guest.
+SWIFT_LOOPBACK_DISK_SIZE=30G
+
 LIBVIRT_TYPE=kvm
 
 # ForensicNova plugin
@@ -455,11 +460,11 @@ DevStack occasionally leaves or duplicates `swift.img` loop-mount entries in `/e
 
 Acquisitions are executed synchronously and the dashboard waits for completion. For very large guests (>4 GB of RAM) or slow storage, a browser may close the connection before the pipeline finishes. The server-side pipeline completes regardless and the acquisition appears in the list on refresh. A thesis roadmap item refactors this into an async job with a real progress bar.
 
-### Single-PUT upload threshold (≥ 4 GB RAM rejected)
+### Large acquisitions and the Swift loopback
 
-The dump uploader in `app/storage/swift_client.py` performs a single Swift `PUT` per acquisition and enforces a hard cap of `SIMPLE_UPLOAD_THRESHOLD = 4 GiB` on the source file. Acquisitions whose RAM image meets or exceeds that size raise `NotImplementedError` before contacting Swift, with the local dump preserved.
+The dump uploader in `app/storage/swift_client.py` branches on file size: dumps below 4 GiB are uploaded with a single Swift `PUT` and verified end-to-end against the server-returned ETag; dumps at or above 4 GiB are uploaded as a Swift Static Large Object (SLO), split into 4 GiB segments stored in a companion `<container>_segments` container with a JSON manifest stored alongside the dump in the main container. A composite ETag (`md5(concat seg_etags)-N`) is verified end-to-end and orphan segments are cleaned up on any failure. There is no longer a hard cap on guest RAM size.
 
-In practice this means VMs configured with **≥ 4 GB of RAM** are not acquirable by the prototype. The choice is conservative: Swift itself accepts single PUTs up to 5 GiB and supports arbitrary sizes via Swift Large Object (SLO/DLO). SLO support is on the thesis roadmap. Demo VMs are sized at 2 GB RAM, well within the threshold.
+In DevStack, the Swift backend is a loopback file (`/opt/stack/data/swift/drives/images/swift.img`) whose size defaults to roughly 6 GB. This is too small to hold even a single 8 GiB SLO acquisition. The provided `local.conf.example` sets `SWIFT_LOOPBACK_DISK_SIZE=30G` to accommodate multi-acquisition workflows and leave headroom for Swift internals. Raise the value further if you intend to keep many large acquisitions in the evidence locker without re-stacking.
 
 ### O(N) listing over Swift
 
@@ -481,7 +486,6 @@ The prototype is the baseline for the M.Sc. thesis. Planned incremental work, bu
 - **Unified incident timeline** — cross-correlation between RAM findings and OpenStack service logs (Nova, Keystone, Neutron) to reconstruct attack sequences against a compromised VM.
 - **Cumulative signed PDF report** — on-demand generation of a PDF bundling multiple acquisitions, with operator name signature, QR-encoded hashes, and a deterministic cover sheet for legal hand-off.
 - **Streaming acquisition (Scenario B, zero persistent footprint)** — dedicated thesis chapter benchmarking a `libvirt → pipe → hasher → Swift` streaming pipeline against the current staging-based Scenario A+, with trade-off analysis and measured performance.
-- **Swift Large Object (SLO) support** — replacing the 4 GiB single-PUT cap with segmented uploads so guests of arbitrary RAM size can be acquired.
 - **Nova `policy.yaml` override** — replacing the pragmatic cross-tenant `admin` grant with a least-privilege, read-only `forensic_analyst` policy.
 - **Horizon panel integration** — optional integration of the dashboard as a Horizon panel for unified OpenStack operator experience.
 

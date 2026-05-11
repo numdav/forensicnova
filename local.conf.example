@@ -22,6 +22,20 @@ SWIFT_HASH=change_me_to_a_random_string
 SWIFT_REPLICAS=1
 SWIFT_DATA_DIR=/opt/stack/data/swift
 
+# Swift loopback disk size.
+#
+# DevStack defaults to a small loopback (about 6 GB) which is sufficient for
+# the CirrOS test images that DevStack ships, but NOT for forensic RAM dumps:
+# a single dump of an 8 GiB guest splits into 2 SLO segments of 4 GiB each
+# plus a manifest, requiring roughly 12 GiB of object-store space just for
+# one acquisition. To allow multiple acquisitions and leave headroom for the
+# Swift internals (account/container databases, partition rebalance scratch),
+# we size the loopback at 30 GB.
+#
+# Raise this value if you plan to acquire larger guests or keep many
+# acquisitions in the evidence locker before re-stacking.
+SWIFT_LOOPBACK_DISK_SIZE=30G
+
 # ===== KVM with nested virtualization =====
 LIBVIRT_TYPE=kvm
 
