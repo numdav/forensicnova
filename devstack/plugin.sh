@@ -48,10 +48,7 @@ forensicnova_ensure_dirs() {
 
 # Generate the Flask session signing key if not already present.
 # IDEMPOTENT: preserving the existing key across ./unstack.sh + ./stack.sh
-# keeps active dashboard sessions valid (rotating the key would force all
-# logged-in analysts to re-authenticate after every restack).
-# A fresh key is generated only when the file is missing (first stack, or
-# after ./clean.sh which removes the entire work_dir).
+# keeps active dashboard sessions valid.
 forensicnova_ensure_secret_key() {
     local secret_key_file="${FORENSICNOVA_WORK_DIR}/secret_key"
     if [[ -f "$secret_key_file" ]]; then
@@ -62,28 +59,21 @@ forensicnova_ensure_secret_key() {
             "generating new Flask secret_key at $secret_key_file"
         openssl rand -hex 32 | sudo tee "$secret_key_file" >/dev/null
     fi
-    # Always fix ownership and perms — belt-and-suspenders for files created
-    # manually by an operator before the plugin took over.
     sudo chown "$STACK_USER:$STACK_USER" "$secret_key_file"
     sudo chmod 600 "$secret_key_file"
 }
 
 # Keystone identity artifacts: role, project, user, role assignments.
 # Also grants dfir-tester the 'admin' role on EVERY existing project
-# so the forensic analyst can read metadata of any tenant's VMs
-# (needed by Nova/Glance API calls in app/forensics/nova_metadata.py).
-# Read-only cross-tenant visibility is the DFIR analyst contract.
+# so the forensic analyst can read metadata of any tenant's VMs.
 forensicnova_ensure_identity() {
     forensicnova_log "extra" "ensuring Keystone identity artifacts"
 
-    # Custom role for forensic analysts.
     get_or_create_role "$FORENSICNOVA_ROLE"
 
-    # Dedicated project for DFIR artifacts.
     get_or_create_project "$FORENSICNOVA_PROJECT" default \
         "$FORENSICNOVA_PROJECT_DESCRIPTION"
 
-    # Test user and base role assignments in the 'forensics' project.
     get_or_create_user "$FORENSICNOVA_DFIR_USER" \
         "$FORENSICNOVA_DFIR_PASSWORD" default
     get_or_add_user_project_role "$FORENSICNOVA_ROLE" \
@@ -93,14 +83,11 @@ forensicnova_ensure_identity() {
     get_or_add_user_project_role "admin" \
         "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
 
-    # Cross-tenant admin role: grant 'admin' on every existing project
-    # so dfir-tester can query Nova/Glance metadata for any VM regardless
-    # of its owner project.  Idempotent via get_or_add_user_project_role.
+    # Cross-tenant admin role: grant 'admin' on every existing project.
     forensicnova_log "extra" \
         "granting 'admin' role on all projects to ${FORENSICNOVA_DFIR_USER}"
     local project
     for project in $(openstack project list -c Name -f value 2>/dev/null); do
-        # Skip service and internal projects we don't want the DFIR user in.
         case "$project" in
             service)
                 continue
@@ -113,17 +100,28 @@ forensicnova_ensure_identity() {
     done
 }
 
+# Ensure both the main forensic container AND the segments container that
+# SLO uploads (Feature 2) need. The segments container hosts dump segments
+# named '<dump_object_name>/seg-NNNN'; Swift treats it as an ordinary
+# container, but by convention we keep it separate from the main one to
+# clearly distinguish forensic artefacts (manifests, JSON reports, simple
+# uploads) from raw segments that have no standalone meaning.
 forensicnova_ensure_container() {
+    local main_container="$FORENSICNOVA_SWIFT_CONTAINER"
+    local segments_container="${FORENSICNOVA_SWIFT_CONTAINER}_segments"
     forensicnova_log "extra" \
-        "ensuring Swift container '$FORENSICNOVA_SWIFT_CONTAINER' in project '$FORENSICNOVA_PROJECT'"
+        "ensuring Swift containers '${main_container}' and '${segments_container}' in project '${FORENSICNOVA_PROJECT}'"
     (
         export OS_USERNAME="$FORENSICNOVA_DFIR_USER"
         export OS_PASSWORD="$FORENSICNOVA_DFIR_PASSWORD"
         export OS_PROJECT_NAME="$FORENSICNOVA_PROJECT"
         export OS_USER_DOMAIN_ID=default
         export OS_PROJECT_DOMAIN_ID=default
-        openstack container show "$FORENSICNOVA_SWIFT_CONTAINER" >/dev/null 2>&1 \
-            || openstack container create "$FORENSICNOVA_SWIFT_CONTAINER" >/dev/null
+        local cont
+        for cont in "$main_container" "$segments_container"; do
+            openstack container show "$cont" >/dev/null 2>&1 \
+                || openstack container create "$cont" >/dev/null
+        done
     )
 }
 
@@ -159,6 +157,7 @@ interface = public
 
 [swift]
 container = ${FORENSICNOVA_SWIFT_CONTAINER}
+slo_segment_size_bytes = ${FORENSICNOVA_SLO_SEGMENT_SIZE}
 
 [forensics]
 project = ${FORENSICNOVA_PROJECT}

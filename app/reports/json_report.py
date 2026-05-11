@@ -1,13 +1,22 @@
 """ForensicNova — JSON forensic report builder.
 
 Produces the machine-readable report that travels with the dump as a
-second Swift object and that the SIFT workstation consumes for
+second Swift object and that downstream forensic tools consume for
 hash verification and analysis routing.
 
-Schema v1.1:
+Schema v1.2 (Feature 2):
+
+  Identical to v1.1 plus, inside the ``dump`` block:
+    - ``upload_method``: "single_put" | "slo"
+    - ``slo_segments``  (only when upload_method == "slo"): list of
+      {name, etag, size, md5, index} entries describing each segment.
+
+  v1.1 readers ignore unknown keys; v1.2 readers see "single_put" or
+  "slo" and act accordingly. The hash fields ``md5`` and ``sha1``
+  remain the canonical full-file digests in both schemas.
 
   {
-    "schema_version": "1.1",
+    "schema_version": "1.2",
     "acquisition_id": "uuid",
     "operator":       "dfir-tester",
     "tool":           {"name": "ForensicNova", "version": "0.1.0"},
@@ -20,20 +29,24 @@ Schema v1.1:
 
     "instance": {"id": "...", "name": "...", "domain": "instance-xxxx"},
 
-    "target_system": {
-        "nova":       {...},
-        "flavor":     {...},
-        "glance":     {...},
-        "hypervisor": {"type": "kvm"},
-        "libvirt":    {...}
-    },
+    "target_system": { ... unchanged ... },
 
     "dump": {
-        "size_bytes": ..., "md5": "...", "sha1": "...",
+        "size_bytes": ...,
+        "md5":  "...",        // full-file MD5 (canonical)
+        "sha1": "...",        // full-file SHA-1 (canonical)
         "swift_object": "forensics/dump-<vm>-<ts>.raw",
-        "swift_etag": "...",
+        "swift_etag":   "...",     // composite etag '<md5>-N' for SLO
         "etag_verified": true,
-        "format": "raw", "acquisition_method": "libvirt-coreDumpWithFormat"
+        "format": "raw",
+        "acquisition_method": "libvirt-coreDumpWithFormat",
+        "upload_method": "single_put" | "slo",
+        "slo_segments":  null | [
+            {"name": "dump-<vm>-<ts>.raw/seg-0001",
+             "etag": "<md5>", "size": 4294967296,
+             "md5":  "<md5>", "index": 1},
+            ...
+        ]
     },
 
     "report": {
@@ -42,7 +55,7 @@ Schema v1.1:
     },
 
     "chain_of_custody": {
-        "total_events": 11,
+        "total_events": <int>,
         "events": [{"seq": 1, "event_type": "...", "description": "...",
                     "timestamp": "...", "data": {...}}, ...]
     }
@@ -56,9 +69,10 @@ from typing import Optional
 
 log = logging.getLogger("forensicnova.reports.json")
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 _EVENT_DESCRIPTIONS = {
+    # --- Pre-Feature-2 events (unchanged) ----------------------------------
     "api_request_received":           "REST endpoint received the acquisition request",
     "acquisition_initiated":          "Acquisition pipeline started — instance identified",
     "domain_lookup_completed":        "Nova UUID resolved to libvirt domain",
@@ -74,6 +88,13 @@ _EVENT_DESCRIPTIONS = {
     "local_dump_secure_deleted":      "Local dump shred-overwritten and unlinked",
     "local_dump_preserved":           "Local dump intentionally NOT deleted (integrity failure)",
     "acquisition_failed":             "Acquisition pipeline aborted — see data.reason",
+
+    # --- Feature 2 events (Swift Static Large Object) ----------------------
+    "slo_upload_started":             "SLO upload started — file split into segments",
+    "swift_segment_uploaded":         "Segment uploaded and per-segment ETag verified locally",
+    "swift_manifest_uploaded":        "SLO manifest PUT — Swift validated all segments server-side",
+    "swift_slo_upload_verified":      "SLO composite ETag verified end-to-end",
+    "slo_cleanup_completed":          "Orphan segments cleaned up after a failed SLO upload",
 }
 
 
@@ -94,18 +115,20 @@ def generate_report(
     events: Optional[list[dict]] = None,
     acquisition_method: str = "libvirt-coreDumpWithFormat",
 ) -> dict:
-    """Assemble the structured forensic report (schema v1.1).
+    """Assemble the structured forensic report (schema v1.2).
 
-    :param report_object_name: The Swift object name under which this report
-                               will be uploaded (e.g. 'report-vm-ts.json').
-                               Embedded in the report itself for self-reference
-                               so analysts can cross-reference dump ↔ report.
-    :param container:          Swift container (default 'forensics').
+    :param swift_result: dict from swift_client.upload_dump(). Now carries
+        two extra keys: ``upload_method`` ("single_put"|"slo") and
+        ``slo_segments`` (list or None). Both are propagated into the
+        ``dump`` block of the report.
     """
     duration = _compute_duration(started_at, timestamp)
     coc_events = _enrich_events(events or [])
 
     report_block = _build_report_block(report_object_name, container)
+
+    upload_method = swift_result.get("upload_method") or "single_put"
+    slo_segments  = swift_result.get("slo_segments")  # may be None
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -141,6 +164,8 @@ def generate_report(
             "etag_verified":      swift_result.get("etag_verified"),
             "format":             "raw",
             "acquisition_method": acquisition_method,
+            "upload_method":      upload_method,
+            "slo_segments":       slo_segments,
         },
         "report": report_block,
         "chain_of_custody": {
@@ -150,16 +175,16 @@ def generate_report(
     }
 
     log.info(
-        "report generated: acq=%s, instance=%s, dump=%s, report=%s, events=%d",
+        "report generated: acq=%s, instance=%s, dump=%s, report=%s, "
+        "events=%d, upload_method=%s",
         acquisition_id, instance_id,
         swift_result.get("swift_object"), report_block.get("swift_object"),
-        len(coc_events),
+        len(coc_events), upload_method,
     )
     return report
 
 
 def serialize_report(report: dict) -> bytes:
-    """Encode a report dict to UTF-8 JSON bytes ready for Swift upload."""
     import json
     return json.dumps(report, indent=2, ensure_ascii=False).encode("utf-8")
 
@@ -169,7 +194,6 @@ def serialize_report(report: dict) -> bytes:
 # ---------------------------------------------------------------------------
 
 def _build_report_block(report_object_name: Optional[str], container: str) -> dict:
-    """Self-reference block so the report knows its own Swift coordinates."""
     if not report_object_name:
         return {"swift_object": None, "filename": None}
     return {
@@ -179,7 +203,6 @@ def _build_report_block(report_object_name: Optional[str], container: str) -> di
 
 
 def _enrich_events(events: list[dict]) -> list[dict]:
-    """Add 1-based seq and human-readable description to each CoC event."""
     enriched = []
     for i, ev in enumerate(events, start=1):
         ev_type = ev.get("event_type", "unknown")
@@ -196,7 +219,6 @@ def _enrich_events(events: list[dict]) -> list[dict]:
 
 
 def _compute_duration(started_at: Optional[str], completed_at: str) -> Optional[float]:
-    """Parse two ISO-8601 UTC strings and return duration in seconds."""
     if not started_at:
         return None
     try:
@@ -210,6 +232,5 @@ def _compute_duration(started_at: Optional[str], completed_at: str) -> Optional[
 
 
 def _parse_iso_utc(s: str) -> datetime:
-    """Parse 'YYYY-MM-DDTHH:MM:SS.ffffffZ' into a datetime."""
     normalised = s.replace("Z", "+00:00")
     return datetime.fromisoformat(normalised)

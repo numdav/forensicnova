@@ -17,6 +17,14 @@ FORENSICNOVA_DFIR_PASSWORD=${FORENSICNOVA_DFIR_PASSWORD:-}
 # --- Swift storage ---
 FORENSICNOVA_SWIFT_CONTAINER=${FORENSICNOVA_SWIFT_CONTAINER:-forensics}
 
+# Feature 2 — SLO segment size in BYTES.
+#   Default 4 GiB = 4 * 1024^3 = 4294967296.
+#   Files at or above this size are uploaded via Swift Static Large Object,
+#   split into segments of this exact size (last segment may be smaller).
+#   Override in local.conf for testing with smaller segments, e.g.
+#     FORENSICNOVA_SLO_SEGMENT_SIZE=536870912    # 512 MiB
+FORENSICNOVA_SLO_SEGMENT_SIZE=${FORENSICNOVA_SLO_SEGMENT_SIZE:-4294967296}
+
 # --- Runtime filesystem layout (on the host) ---
 FORENSICNOVA_WORK_DIR=${FORENSICNOVA_WORK_DIR:-/var/lib/forensicnova}
 FORENSICNOVA_LOG_DIR=${FORENSICNOVA_LOG_DIR:-/var/log/forensicnova}

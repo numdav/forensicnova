@@ -22,13 +22,15 @@ Pipeline ordering (memory_acquire):
   1. acquire_memory         (libvirt dump, chown, staging)
   2. compute_hashes         (MD5 + SHA1 streaming)
   3. nova_metadata.collect  (Nova + Glance + libvirt XML)
-  4. upload_dump            (Swift PUT + etag verification)
+  4. upload_dump            (Swift PUT/SLO + etag verification)
   5. secure_delete          (shred -u local dump; only if etag verified)
   6. generate_report        (full CoC + self-referencing report.swift_object)
   7. upload_json            (report as second Swift object)
 
 Object naming: dump-<sanitized_vm>-<YYYYMMDDTHHMMSSZ>.raw
                report-<sanitized_vm>-<YYYYMMDDTHHMMSSZ>.json
+               (SLO segments live in '<container>_segments' as
+                'dump-<sanitized_vm>-<YYYYMMDDTHHMMSSZ>.raw/seg-NNNN')
 """
 from __future__ import annotations
 
@@ -214,9 +216,12 @@ def memory_acquire(instance_id: str):
         )
 
         log.info(
-            "memory_acquire DONE: acq_id=%s vm=%s size=%d md5=%s",
-            acquisition_id, vm_name_raw, hash_result["size_bytes"], hash_result["md5"],
+            "memory_acquire DONE: acq_id=%s vm=%s size=%d md5=%s method=%s",
+            acquisition_id, vm_name_raw,
+            hash_result["size_bytes"], hash_result["md5"],
+            swift_result.get("upload_method"),
         )
+        slo_segments = swift_result.get("slo_segments") or []
         return jsonify({
             "acquisition_id":      acquisition_id,
             "status":              "completed",
@@ -230,6 +235,8 @@ def memory_acquire(instance_id: str):
             "md5":                 hash_result["md5"],
             "sha1":                hash_result["sha1"],
             "etag_verified":       swift_result["etag_verified"],
+            "upload_method":       swift_result.get("upload_method"),
+            "slo_segments_count":  len(slo_segments),
             "dump_swift_object":   swift_result["swift_object"],
             "report_swift_object": report_swift_result["swift_object"],
         }), 201
@@ -392,9 +399,9 @@ def get_acquisition(acquisition_id: str):
 def download_acquisition_dump(acquisition_id: str):
     """Stream the raw memory dump to the client.
 
-    The body is streamed chunk-by-chunk directly from Swift through Flask —
-    never fully loaded into the API process's RAM.  For a 4 GB Windows
-    dump this means constant ~1 MB memory usage regardless of file size.
+    For SLO objects, Swift transparently re-assembles the segments at
+    GET time, so the analyst sees a single stream regardless of upload
+    method.
     """
     cfg = current_app.config["FORENSICNOVA"]
     operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
@@ -469,9 +476,6 @@ def download_acquisition_report(acquisition_id: str):
             detail=f"no acquisition found with id {acquisition_id}",
         ), 404
 
-    # Object name is either in the self-referencing report block (preferred)
-    # or derivable via full-scan (we already have it from the lookup, but
-    # the lookup doesn't expose the name).  Use the self-ref.
     report_block = report.get("report") or {}
     object_name = report_block.get("filename") or _extract_object_name(
         report_block.get("swift_object", "")
@@ -497,17 +501,7 @@ def download_acquisition_report(acquisition_id: str):
 
 @api_v1_bp.route("/acquisitions/<acquisition_id>/report.pdf", methods=["GET"])
 def download_acquisition_report_pdf(acquisition_id: str):
-    """Render and serve a PDF version of the JSON report on demand.
-
-    The PDF is generated fresh from the canonical JSON report at every call.
-    It is NOT persisted on Swift — the JSON remains the single source of
-    truth, the PDF is a derived view intended for legal hand-off and
-    operator countersignature.
-
-    Each generation produces a byte-different PDF (CreationDate moves), so
-    the document can be archived as a distinct print event with a
-    verifiable timestamp.
-    """
+    """Render and serve a PDF version of the JSON report on demand."""
     cfg = current_app.config["FORENSICNOVA"]
     operator = request.environ.get("HTTP_X_USER_NAME", "unknown")
 
@@ -523,9 +517,6 @@ def download_acquisition_report_pdf(acquisition_id: str):
             detail=f"no acquisition found with id {acquisition_id}",
         ), 404
 
-    # Derive the PDF filename from the JSON filename, swapping the suffix
-    # (report-<vm>-<ts>.json -> report-<vm>-<ts>.pdf). The self-reference
-    # block of the report is the authoritative source for the JSON name.
     report_block = report.get("report") or {}
     json_filename = (
         report_block.get("filename") or f"report-{acquisition_id}.json"
@@ -566,11 +557,7 @@ def download_acquisition_report_pdf(acquisition_id: str):
 # ---------------------------------------------------------------------------
 
 def _find_report_by_acquisition_id(acquisition_id: str, cfg):
-    """Scan Swift report-*.json and return the parsed report matching the id.
-
-    Shared between GET /acquisitions/<id>, /dump, /report and /report.pdf.
-    See the thesis optimization note in the original list_acquisitions docstring.
-    """
+    """Scan Swift report-*.json and return the parsed report matching the id."""
     try:
         report_names = list_reports(cfg)
     except Exception:
@@ -599,11 +586,6 @@ def _find_report_by_acquisition_id(acquisition_id: str, cfg):
 
 
 def _extract_object_name(swift_object_path: str) -> str:
-    """Extract the object name from a 'container/object' path.
-
-    Swift paths in the report look like 'forensics/dump-vm-ts.raw'.
-    We use the object name (no container) for swiftclient calls.
-    """
     if not swift_object_path:
         return ""
     if "/" in swift_object_path:
@@ -618,22 +600,26 @@ def _build_summary(report: dict, object_name: str) -> dict:
     timestamps = report.get("timestamps", {}) or {}
     report_blk = report.get("report", {}) or {}
 
+    slo_segments = dump.get("slo_segments") or []
+
     return {
-        "acquisition_id":   report.get("acquisition_id"),
-        "operator":         report.get("operator"),
-        "vm_name":          instance.get("name"),
-        "instance_id":      instance.get("id"),
-        "domain_name":      instance.get("domain"),
-        "started_at":       timestamps.get("started_at"),
-        "completed_at":     timestamps.get("completed_at"),
-        "duration_seconds": timestamps.get("duration_seconds"),
-        "size_bytes":       dump.get("size_bytes"),
-        "md5":              dump.get("md5"),
-        "sha1":              dump.get("sha1"),
-        "etag_verified":    dump.get("etag_verified"),
-        "swift_dump":       dump.get("swift_object"),
-        "swift_report":     report_blk.get("swift_object"),
-        "report_object":    object_name,
+        "acquisition_id":      report.get("acquisition_id"),
+        "operator":            report.get("operator"),
+        "vm_name":             instance.get("name"),
+        "instance_id":         instance.get("id"),
+        "domain_name":         instance.get("domain"),
+        "started_at":          timestamps.get("started_at"),
+        "completed_at":        timestamps.get("completed_at"),
+        "duration_seconds":    timestamps.get("duration_seconds"),
+        "size_bytes":          dump.get("size_bytes"),
+        "md5":                 dump.get("md5"),
+        "sha1":                dump.get("sha1"),
+        "etag_verified":       dump.get("etag_verified"),
+        "upload_method":       dump.get("upload_method") or "single_put",
+        "slo_segments_count":  len(slo_segments),
+        "swift_dump":          dump.get("swift_object"),
+        "swift_report":        report_blk.get("swift_object"),
+        "report_object":       object_name,
     }
 
 
