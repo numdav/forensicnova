@@ -618,24 +618,16 @@ def _upload_dump_slo(
         })
 
         # Composite etag verification.
-        # Swift's documented composite is: md5(concat(seg_etag_bytes))-N
-        # The '-N' suffix is the segment count.
+        # Compute locally: md5(concat(seg_etag_ascii_bytes))
         composite_local = _compute_composite_etag([s["etag"] for s in uploaded])
-        if "-" in manifest_etag:
-            swift_composite, _, swift_suffix = manifest_etag.rpartition("-")
-        else:
-            swift_composite = manifest_etag
-            swift_suffix = ""
-
-        try:
-            swift_n = int(swift_suffix) if swift_suffix else -1
-        except ValueError:
-            swift_n = -1
-
-        composite_match = (
-            swift_composite.lower() == composite_local.lower()
-            and swift_n == n_segments
-        )
+        
+        # Swift returns just the hash on PUT manifest response, not the -N suffix.
+        # We strip the -N from our local composite if we appended it, or just 
+        # compare the raw hashes directly.
+        # Remove any quotes or whitespace from swift's response
+        swift_composite = manifest_etag.strip('"\'-') 
+        
+        composite_match = (swift_composite.lower() == composite_local.lower())
 
         _emit(log_event, "swift_slo_upload_verified", {
             "object_name":          object_name,
@@ -643,15 +635,14 @@ def _upload_dump_slo(
             "composite_etag_match": composite_match,
             "computed_composite":   composite_local,
             "swift_composite":      swift_composite,
-            "swift_suffix":         swift_n,
             "segments_count":       n_segments,
         })
 
         if not composite_match:
             raise IntegrityError(
                 f"SLO composite etag mismatch for {object_name}: "
-                f"computed={composite_local}-{n_segments} "
-                f"swift={manifest_etag}"
+                f"computed={composite_local} "
+                f"swift={swift_composite}"
             )
 
         return {
