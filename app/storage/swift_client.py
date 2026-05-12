@@ -32,9 +32,10 @@ Upload strategy (Feature 2 - SLO):
           it against the MD5 we computed locally while streaming the bytes
           (single I/O pass via _HashingLimitedReader).
        3. JSON manifest is PUT to the main container with the special
-          query string 'multipart-manifest=put&heartbeat=on'. Swift
-          server-side validates that every declared segment exists and
-          that its etag/size match. The manifest carries two custom
+          query string 'multipart-manifest=put'. Swift server-side
+          validates that every declared segment exists and that its
+          etag/size match, then returns 201 Created with the composite
+          ETag in the response header. The manifest carries two custom
           headers, X-Object-Meta-Global-Md5 and X-Object-Meta-Global-Sha1,
           containing the hashes of the full file computed by hasher.py
           BEFORE any transfer. These are the canonical forensic seal.
@@ -44,6 +45,19 @@ Upload strategy (Feature 2 - SLO):
   - On any failure during SLO upload, every segment already PUT in the
     '_segments' container is deleted before the exception propagates,
     so no orphan segments are left behind.
+
+  Why we do NOT use 'heartbeat=on' on the manifest PUT:
+    Swift's 'heartbeat=on' option turns the manifest PUT into a
+    chunked-transfer-encoded 202 Accepted response whose body contains
+    whitespace heartbeats followed by a final "Response Status: 201" line.
+    The python-swiftclient library does not parse this body and only
+    reads the Etag header for status 200/201 — with a 202 response the
+    return value of put_object() is empty, breaking our composite-etag
+    verification. By keeping the PUT synchronous (no heartbeat), Swift
+    returns a plain 201 Created with the Etag header, swiftclient parses
+    it correctly, and the integrity check works. The downside (the PUT
+    can take a few seconds while Swift validates each segment) is
+    acceptable for our manifest sizes (max ~10 segments).
 
 Read operations:
   - list_reports()    : enumerate report-*.json in the main container.
@@ -549,6 +563,11 @@ def _upload_dump_slo(
         manifest_headers["X-Object-Meta-Global-Md5"]  = expected_md5
         manifest_headers["X-Object-Meta-Global-Sha1"] = expected_sha1
 
+        # PUT the manifest synchronously (no heartbeat=on). Swift returns
+        # 201 Created with the composite Etag in the response header;
+        # swiftclient parses it and returns it as the function value.
+        # See the module docstring for the heartbeat-vs-synchronous
+        # rationale.
         manifest_etag_raw = swiftclient.client.put_object(
             url=url,
             token=token,
@@ -556,10 +575,39 @@ def _upload_dump_slo(
             name=object_name,
             contents=manifest_bytes,
             content_type="application/json",
-            query_string="multipart-manifest=put&heartbeat=on",
+            query_string="multipart-manifest=put",
             headers=manifest_headers,
         )
         manifest_etag = (manifest_etag_raw or "").strip('"')
+
+        # Robustness: if swiftclient still didn't return an etag (some
+        # library versions return None even on 201), fall back to a HEAD
+        # on the just-created manifest object. The Etag header on a HEAD
+        # of an SLO manifest is the composite etag, exactly what we need.
+        if not manifest_etag:
+            log.warning(
+                "manifest PUT returned no etag; falling back to HEAD on %s/%s",
+                container, object_name,
+            )
+            try:
+                head_resp = swiftclient.client.head_object(
+                    url=url,
+                    token=token,
+                    container=container,
+                    object_name=object_name,
+                )
+                manifest_etag = (head_resp.get("etag") or "").strip('"')
+                log.info(
+                    "manifest etag recovered from HEAD: %s",
+                    manifest_etag,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("HEAD fallback failed: %s", exc)
+                raise IntegrityError(
+                    f"could not retrieve manifest etag for {object_name}: "
+                    f"PUT returned empty and HEAD failed ({exc})"
+                ) from exc
+
         log.info("SLO manifest uploaded: etag=%s", manifest_etag)
 
         _emit(log_event, "swift_manifest_uploaded", {
