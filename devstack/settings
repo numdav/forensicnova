@@ -14,6 +14,18 @@ FORENSICNOVA_PROJECT_DESCRIPTION=${FORENSICNOVA_PROJECT_DESCRIPTION:-ForensicNov
 FORENSICNOVA_DFIR_USER=${FORENSICNOVA_DFIR_USER:-dfir-tester}
 FORENSICNOVA_DFIR_PASSWORD=${FORENSICNOVA_DFIR_PASSWORD:-}
 
+# --- Keystone service catalog (Feature 3.5) ---
+# ForensicNova registers itself as a first-class OpenStack service so that
+# clients (and the Horizon dashboard in Feature 4) can discover the API
+# endpoint through the Keystone catalog instead of hard-coding host:port.
+#   - SERVICE_NAME : human-readable name shown by 'openstack service list'
+#   - SERVICE_TYPE : the catalog 'type' clients query for (also 'dfir')
+#   - The public URL is built at runtime in plugin.sh from HOST_IP + PORT,
+#     because HOST_IP is not yet known when this settings file is sourced.
+FORENSICNOVA_SERVICE_NAME=${FORENSICNOVA_SERVICE_NAME:-dfir}
+FORENSICNOVA_SERVICE_TYPE=${FORENSICNOVA_SERVICE_TYPE:-dfir}
+FORENSICNOVA_SERVICE_DESCRIPTION=${FORENSICNOVA_SERVICE_DESCRIPTION:-ForensicNova DFIR memory acquisition API}
+
 # --- Swift storage ---
 FORENSICNOVA_SWIFT_CONTAINER=${FORENSICNOVA_SWIFT_CONTAINER:-forensics}
 
@@ -30,6 +42,11 @@ FORENSICNOVA_WORK_DIR=${FORENSICNOVA_WORK_DIR:-/var/lib/forensicnova}
 FORENSICNOVA_LOG_DIR=${FORENSICNOVA_LOG_DIR:-/var/log/forensicnova}
 FORENSICNOVA_CONF_DIR=${FORENSICNOVA_CONF_DIR:-/etc/forensicnova}
 FORENSICNOVA_CONF_FILE=${FORENSICNOVA_CONF_FILE:-$FORENSICNOVA_CONF_DIR/forensicnova.conf}
+
+# Feature 3.5 — directory where the async JobManager persists one JSON
+# file per acquisition job. Lives under WORK_DIR so it shares the same
+# ownership (stack:stack) and is wiped by clean.
+FORENSICNOVA_JOBS_DIR=${FORENSICNOVA_JOBS_DIR:-$FORENSICNOVA_WORK_DIR/jobs}
 
 # --- Generated openrc for testing as dfir-tester ---
 FORENSICNOVA_OPENRC=${FORENSICNOVA_OPENRC:-$DEST/devstack/openrc-dfir}

@@ -4,9 +4,16 @@ Error taxonomy raised to views (all inherit from ApiClientError):
   - SessionRevokedError : API returned 401    (token revoked/expired)
   - ApiForbiddenError   : API returned 403    (role removed mid-session)
   - ApiNotFoundError    : API returned 404    (resource does not exist)
-  - AcquisitionError    : acquisition pipeline failed (500/502 on POST)
+  - AcquisitionError    : acquisition request rejected (500/502 on POST)
   - ApiUnavailableError : transport or other 5xx
   - ApiClientError      : other 4xx
+
+Feature 3.5 — async acquisition:
+  trigger_acquisition() now expects HTTP 202 from the API: the POST
+  returns immediately with a job_id and the pipeline runs in the
+  background. The view layer redirects the operator to the job-watch
+  page, which polls get_job() until the job reaches a terminal state.
+  get_job() / list_jobs() are the new read endpoints for job state.
 """
 from __future__ import annotations
 
@@ -21,7 +28,10 @@ _API_BASE = "http://127.0.0.1:5234/api/v1"
 
 _CONNECT_TIMEOUT          = 2.0
 _READ_TIMEOUT_FAST        = 15.0
-_READ_TIMEOUT_ACQUISITION = 600.0
+# The async POST returns 202 in milliseconds — no need for the old
+# 10-minute window. A short read timeout is enough; the long-running
+# work now happens in the background worker thread.
+_READ_TIMEOUT_ACQUISITION = 30.0
 _READ_TIMEOUT_DOWNLOAD    = 600.0  # large dumps: 4 GB at 50 MB/s ~ 80s + slack
 
 # Streaming chunk size forwarded from requests to the client.  Matches
@@ -46,7 +56,7 @@ class ApiNotFoundError(ApiClientError):
 
 
 class AcquisitionError(ApiClientError):
-    """The acquisition pipeline itself failed (libvirt/integrity/fs/other)."""
+    """The acquisition request was rejected by the API (libvirt/fs/other)."""
 
     def __init__(self, message: str, detail: dict):
         super().__init__(message)
@@ -73,7 +83,23 @@ def list_servers() -> dict:
     return _get("/servers/")
 
 
+def list_jobs() -> dict:
+    """GET /jobs/ — all async jobs, most recent first."""
+    return _get("/jobs/")
+
+
+def get_job(job_id: str) -> dict:
+    """GET /jobs/<job_id> — current state of one async job."""
+    return _get(f"/jobs/{job_id}")
+
+
 def trigger_acquisition(instance_id: str) -> dict:
+    """POST /servers/<id>/memory_acquire — async, returns the 202 body.
+
+    The returned dict contains at least: job_id, instance_id, status
+    ("pending"), phase ("queued"). acquisition_id is null at this point;
+    it appears on the job record once the worker thread generates it.
+    """
     return _post(
         f"/servers/{instance_id}/memory_acquire",
         read_timeout=_READ_TIMEOUT_ACQUISITION,
@@ -224,18 +250,33 @@ def _post(path: str, read_timeout: float) -> dict:
 
     _raise_for_common_errors(resp, path)
 
+    # 500/502 on the async POST means the API rejected the request before
+    # the job could even be created (e.g. JobManager unavailable, or a
+    # pre-flight error). The pipeline itself no longer fails here — that
+    # surfaces later on the job record.
     if resp.status_code in (500, 502):
         try:
             detail = resp.json()
         except ValueError:
             detail = {"error": "unknown", "detail": resp.text[:200]}
         log.error(
-            "acquisition pipeline failed HTTP %d: %s",
+            "acquisition request rejected HTTP %d: %s",
             resp.status_code, detail,
         )
         raise AcquisitionError(
             detail.get("detail") or detail.get("error") or
-            "acquisition pipeline failed",
+            "acquisition request rejected",
+            detail=detail,
+        )
+
+    if resp.status_code == 503:
+        try:
+            detail = resp.json()
+        except ValueError:
+            detail = {"error": "unavailable", "detail": resp.text[:200]}
+        log.error("acquisition request 503: %s", detail)
+        raise AcquisitionError(
+            detail.get("detail") or "async job manager unavailable",
             detail=detail,
         )
 
@@ -249,6 +290,7 @@ def _post(path: str, read_timeout: float) -> dict:
             f"API error HTTP {resp.status_code}: {resp.text[:120]}"
         )
 
+    # Success path: 202 Accepted (async) — body carries job_id etc.
     try:
         return resp.json()
     except ValueError as exc:

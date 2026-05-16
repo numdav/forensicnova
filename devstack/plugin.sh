@@ -6,8 +6,9 @@
 #   stack pre-install   -> preinstall_forensicnova  (system packages)
 #   stack install       -> install_forensicnova     (python venv + pip deps)
 #   stack post-config   -> configure_forensicnova   (dirs, conf file, openrc, secret_key)
-#   stack extra         -> init_forensicnova        (keystone, swift, systemd)
-#   unstack             -> stop_forensicnova        (stop systemd unit)
+#   stack extra         -> init_forensicnova        (keystone identity, swift,
+#                                                    service catalog, systemd)
+#   unstack             -> stop_forensicnova        (stop unit, drop service catalog)
 #   clean               -> cleanup_forensicnova     (remove unit + data)
 
 FORENSICNOVA_PLUGIN_DIR=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")")
@@ -39,7 +40,8 @@ forensicnova_log() {
 forensicnova_ensure_dirs() {
     forensicnova_log "post-config" "ensuring runtime directories"
     local d
-    for d in "$FORENSICNOVA_WORK_DIR" "$FORENSICNOVA_LOG_DIR" "$FORENSICNOVA_CONF_DIR"; do
+    for d in "$FORENSICNOVA_WORK_DIR" "$FORENSICNOVA_LOG_DIR" \
+             "$FORENSICNOVA_CONF_DIR" "$FORENSICNOVA_JOBS_DIR"; do
         sudo mkdir -p "$d"
         sudo chown -R "$STACK_USER:$STACK_USER" "$d"
         sudo chmod 750 "$d"
@@ -66,6 +68,11 @@ forensicnova_ensure_secret_key() {
 # Keystone identity artifacts: role, project, user, role assignments.
 # Also grants dfir-tester the 'admin' role on EVERY existing project
 # so the forensic analyst can read metadata of any tenant's VMs.
+#
+# This admin-on-all-projects grant is the pragmatic prototype workaround.
+# A least-privilege Nova policy.yaml override (the deferred Feature 3)
+# is incompatible with Nova 2026.2's enforce_new_defaults=True and is
+# documented as a thesis-roadmap item.
 forensicnova_ensure_identity() {
     forensicnova_log "extra" "ensuring Keystone identity artifacts"
 
@@ -125,6 +132,98 @@ forensicnova_ensure_container() {
     )
 }
 
+# Feature 3.5 — register ForensicNova as a first-class OpenStack service
+# in the Keystone catalog.
+#
+# Creates one service entry of type ${FORENSICNOVA_SERVICE_TYPE} and three
+# endpoints (public / internal / admin), all pointing at the Flask service
+# on http://${HOST_IP}:${FORENSICNOVA_PORT}. This is what lets the Horizon
+# dashboard (Feature 4) discover the API through the catalog rather than
+# hard-coding host:port.
+#
+# Idempotency:
+#   - the service entry uses 'openstack service create --or-show', which
+#     returns the existing entry instead of failing if it already exists;
+#   - each endpoint is created only if 'openstack endpoint list' shows no
+#     existing endpoint of that interface for our service, so a re-run on
+#     a live cloud does not produce duplicates.
+#   Note: a full ./unstack.sh + ./stack.sh rebuilds the Keystone DB from
+#   scratch, so on a normal restack this function always starts clean.
+forensicnova_register_dfir_service() {
+    local public_url="http://${HOST_IP}:${FORENSICNOVA_PORT}"
+    local region="${REGION_NAME:-RegionOne}"
+
+    forensicnova_log "extra" \
+        "registering '${FORENSICNOVA_SERVICE_NAME}' service in Keystone catalog (${public_url}, region ${region})"
+
+    openstack service create \
+        --name "$FORENSICNOVA_SERVICE_NAME" \
+        --description "$FORENSICNOVA_SERVICE_DESCRIPTION" \
+        --or-show \
+        "$FORENSICNOVA_SERVICE_TYPE" >/dev/null \
+        || {
+            forensicnova_log "extra" \
+                "WARNING: could not create/show service '${FORENSICNOVA_SERVICE_NAME}' — skipping endpoints"
+            return 0
+        }
+
+    local iface existing
+    for iface in public internal admin; do
+        existing=$(openstack endpoint list \
+            --service "$FORENSICNOVA_SERVICE_TYPE" \
+            --interface "$iface" \
+            -f value -c ID 2>/dev/null)
+        if [[ -n "$existing" ]]; then
+            forensicnova_log "extra" \
+                "endpoint ${iface} already present (${existing}) — skipping"
+        else
+            if openstack endpoint create \
+                --region "$region" \
+                "$FORENSICNOVA_SERVICE_TYPE" \
+                "$iface" \
+                "$public_url" >/dev/null 2>&1; then
+                forensicnova_log "extra" \
+                    "endpoint ${iface} created -> ${public_url}"
+            else
+                forensicnova_log "extra" \
+                    "WARNING: could not create ${iface} endpoint (non-fatal)"
+            fi
+        fi
+    done
+    forensicnova_log "extra" "service catalog registration complete"
+}
+
+# Feature 3.5 — remove the ForensicNova service + endpoints from the
+# Keystone catalog. Best-effort: during ./unstack.sh Keystone may already
+# be shutting down, so every failure is logged as a warning and ignored.
+forensicnova_unregister_dfir_service() {
+    forensicnova_log "unstack" \
+        "removing '${FORENSICNOVA_SERVICE_NAME}' from Keystone catalog (best-effort)"
+
+    local iface ep_id
+    for iface in public internal admin; do
+        ep_id=$(openstack endpoint list \
+            --service "$FORENSICNOVA_SERVICE_TYPE" \
+            --interface "$iface" \
+            -f value -c ID 2>/dev/null)
+        if [[ -n "$ep_id" ]]; then
+            if openstack endpoint delete "$ep_id" >/dev/null 2>&1; then
+                forensicnova_log "unstack" "endpoint ${iface} (${ep_id}) deleted"
+            else
+                forensicnova_log "unstack" \
+                    "WARNING: could not delete endpoint ${ep_id} (ignored)"
+            fi
+        fi
+    done
+
+    if openstack service delete "$FORENSICNOVA_SERVICE_TYPE" >/dev/null 2>&1; then
+        forensicnova_log "unstack" "service '${FORENSICNOVA_SERVICE_NAME}' deleted"
+    else
+        forensicnova_log "unstack" \
+            "no service to delete, or Keystone unavailable (ignored)"
+    fi
+}
+
 forensicnova_write_config() {
     forensicnova_log "post-config" "writing $FORENSICNOVA_CONF_FILE"
     sudo tee "$FORENSICNOVA_CONF_FILE" >/dev/null <<EOF
@@ -140,7 +239,7 @@ log_dir = ${FORENSICNOVA_LOG_DIR}
 
 [keystone]
 auth_url = http://${HOST_IP}/identity
-region_name = RegionOne
+region_name = ${REGION_NAME:-RegionOne}
 forensic_role = ${FORENSICNOVA_ROLE}
 
 [keystone_authtoken]
@@ -165,6 +264,9 @@ dfir_user = ${FORENSICNOVA_DFIR_USER}
 
 [libvirt]
 uri = qemu:///system
+
+[jobs]
+jobs_dir = ${FORENSICNOVA_JOBS_DIR}
 EOF
     sudo chown "$STACK_USER:$STACK_USER" "$FORENSICNOVA_CONF_FILE"
     sudo chmod 640 "$FORENSICNOVA_CONF_FILE"
@@ -184,7 +286,7 @@ export OS_PROJECT_DOMAIN_ID=default
 export OS_USER_DOMAIN_ID=default
 export OS_IDENTITY_API_VERSION=3
 export OS_AUTH_TYPE=password
-export OS_REGION_NAME=RegionOne
+export OS_REGION_NAME=${REGION_NAME:-RegionOne}
 EOF
     chmod 600 "$FORENSICNOVA_OPENRC"
 }
@@ -305,6 +407,7 @@ init_forensicnova() {
     forensicnova_marker "extra"
     forensicnova_ensure_identity
     forensicnova_ensure_container
+    forensicnova_register_dfir_service
     forensicnova_install_systemd_unit
     forensicnova_start_service
     forensicnova_log "extra" "init completed"
@@ -321,6 +424,7 @@ stop_forensicnova() {
     else
         forensicnova_log "unstack" "no systemd unit to stop"
     fi
+    forensicnova_unregister_dfir_service
 }
 
 cleanup_forensicnova() {

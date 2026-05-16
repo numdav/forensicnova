@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}
+  Acquisition jobs — ForensicNova
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <span class="fs-2 fw-semibold text-body">Acquisition jobs</span>
+        <div class="small text-body-secondary mt-1">
+            Async memory-acquisition jobs, most recent first.
+        </div>
+    </div>
+    <div>
+        <a href="{{ url_for('dashboard.acquire') }}" class="btn btn-primary">
+            New acquisition
+        </a>
+    </div>
+</div>
+
+{% if count == 0 %}
+    <div class="card border-secondary">
+        <div class="card-body text-center text-body-secondary py-5">
+            No acquisition jobs yet. Start one from the
+            <a href="{{ url_for('dashboard.acquire') }}">New acquisition</a> page.
+        </div>
+    </div>
+{% else %}
+    <div class="card border-secondary">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="bg-body-tertiary">
+                    <tr>
+                        <th class="small text-body-secondary">Status</th>
+                        <th class="small text-body-secondary">Target VM</th>
+                        <th class="small text-body-secondary">Phase</th>
+                        <th class="small text-body-secondary">Operator</th>
+                        <th class="small text-body-secondary">Started</th>
+                        <th class="small text-body-secondary text-end">Elapsed</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for job in jobs %}
+                        {% if job.status == 'completed' %}
+                            {% set badge = 'text-bg-success' %}
+                        {% elif job.status == 'failed' %}
+                            {% set badge = 'text-bg-danger' %}
+                        {% elif job.status == 'running' %}
+                            {% set badge = 'text-bg-info' %}
+                        {% else %}
+                            {% set badge = 'text-bg-secondary' %}
+                        {% endif %}
+                        <tr>
+                            <td>
+                                <span class="badge {{ badge }}">
+                                    {{ (job.status or 'pending') | upper }}
+                                </span>
+                            </td>
+                            <td class="font-mono text-info">
+                                {{ job.instance_name or '(unknown)' }}
+                            </td>
+                            <td class="font-mono small">
+                                {{ job.phase or '—' }}
+                            </td>
+                            <td class="font-mono small">
+                                {{ job.operator or '—' }}
+                            </td>
+                            <td class="font-mono small text-body-secondary">
+                                {{ (job.started_at or '')[:19] | replace('T', ' ') }}
+                            </td>
+                            <td class="font-mono small text-end">
+                                {{ job.elapsed_seconds if job.elapsed_seconds is not none else 0 }} s
+                            </td>
+                            <td class="text-end">
+                                {% if job.status == 'completed' and job.acquisition_id %}
+                                    <a class="btn btn-sm btn-outline-success"
+                                       href="{{ url_for('dashboard.acquisition_detail',
+                                                        acquisition_id=job.acquisition_id) }}">
+                                        Report
+                                    </a>
+                                {% else %}
+                                    <a class="btn btn-sm btn-outline-secondary"
+                                       href="{{ url_for('dashboard.job_watch',
+                                                        job_id=job.job_id) }}">
+                                        Watch
+                                    </a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+{% endif %}
+
+{% endblock %}

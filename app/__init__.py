@@ -57,6 +57,16 @@ Design rationale:
      clients (curl, scripts, the dashboard itself via loopback) — CSRF
      tokens would break them.  Only the dashboard blueprint is actually
      CSRF-protected, since only it consumes HTML forms with cookie auth.
+
+6. Async job manager (Feature 3.5)
+   - A single JobManager instance lives in app.config["FORENSICNOVA_JOBS"].
+   - It is created here, with the jobs directory derived from cfg.work_dir
+     (default /var/lib/forensicnova/jobs).
+   - recover_on_startup() is called immediately after construction: any
+     job still in 'pending' or 'running' state is marked 'failed' with a
+     synthetic error message ("interrupted by service restart"). A
+     partial dump cannot be trusted as forensic evidence; the operator
+     must re-trigger.
 """
 from __future__ import annotations
 
@@ -165,6 +175,30 @@ def _configure_session(app: Flask, cfg: Config) -> None:
     )
 
 
+def _init_jobs(app: Flask, cfg: Config) -> None:
+    """Initialise the JobManager and recover orphan jobs (Feature 3.5)."""
+    from app.jobs import JobManager
+
+    jobs_dir = cfg.jobs_dir or os.path.join(cfg.work_dir, "jobs")
+    try:
+        os.makedirs(jobs_dir, exist_ok=True)
+    except (PermissionError, OSError) as exc:
+        app.logger.error(
+            "JobManager: cannot create %s (%s); async acquisitions will fail",
+            jobs_dir, exc,
+        )
+        # Still create the manager so endpoints don't crash on import;
+        # writes will fail and surface in the per-job error_message.
+
+    jobs = JobManager(jobs_dir)
+    recovered = jobs.recover_on_startup()
+    app.config["FORENSICNOVA_JOBS"] = jobs
+    app.logger.info(
+        "JobManager ready at %s (orphan jobs recovered: %d)",
+        jobs_dir, recovered,
+    )
+
+
 def _wrap_keystone_auth(app: Flask, cfg: Config) -> None:
     """Wrap app.wsgi_app with keystonemiddleware.auth_token.
 
@@ -233,6 +267,7 @@ def create_app(config: Optional[Config] = None) -> Flask:
 
     _configure_logging(app, cfg)
     _configure_session(app, cfg)
+    _init_jobs(app, cfg)
 
     from app.api import core_bp, api_v1_bp
     from app.dashboard import dashboard_bp

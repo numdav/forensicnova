@@ -59,6 +59,15 @@ Upload strategy (Feature 2 - SLO):
     can take a few seconds while Swift validates each segment) is
     acceptable for our manifest sizes (max ~10 segments).
 
+Progress reporting (Feature 3.5):
+  upload_dump() accepts an optional progress_callback(label: str) used by
+  the async runner to surface fine-grained progress (e.g. "Uploading dump
+  (segment 2 of 5)") on the job record. It is invoked only on the SLO
+  path, once per segment, before each segment PUT. The synchronous
+  single-PUT path does not call it: a single PUT has no intermediate
+  progress to report. The callback is best-effort — any exception raised
+  inside it is swallowed so it can never break an upload.
+
 Read operations:
   - list_reports()    : enumerate report-*.json in the main container.
   - download_json()    : fetch a small JSON object as bytes (full load).
@@ -119,6 +128,27 @@ class SwiftObjectNotFound(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Private — progress callback shim
+# ---------------------------------------------------------------------------
+
+def _report_progress(
+    progress_callback: Optional[Callable[[str], None]],
+    label: str,
+) -> None:
+    """Invoke the progress callback, swallowing any exception.
+
+    Progress reporting is cosmetic: a failing callback (e.g. the job file
+    is momentarily unwritable) must never abort an in-flight upload.
+    """
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(label)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("progress_callback raised (ignored): %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Public API — writes
 # ---------------------------------------------------------------------------
 
@@ -129,11 +159,17 @@ def upload_dump(
     cfg,
     password: Optional[str] = None,
     log_event: Optional[Callable[[str, dict], None]] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Upload a forensic artifact to Swift with integrity verification.
 
     Branches between single PUT and SLO based on file size and the
     threshold configured in cfg.swift_slo_segment_size_bytes.
+
+    :param progress_callback: optional callable(label: str) invoked on the
+        SLO path once per segment with a human-readable progress string.
+        Best-effort: exceptions raised inside it are swallowed. Not
+        invoked on the single-PUT path.
 
     :returns: dict with keys:
         - swift_object   (str): "container/object" path
@@ -178,6 +214,7 @@ def upload_dump(
             file_size=file_size,
             segment_size=_slo_segment_size(cfg),
             log_event=log_event,
+            progress_callback=progress_callback,
         )
 
 
@@ -449,6 +486,7 @@ def _upload_dump_slo(
     file_size: int,
     segment_size: int,
     log_event: Optional[Callable[[str, dict], None]],
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """SLO upload: split, segment PUTs, manifest PUT, composite verify, cleanup."""
     container = cfg.swift_container
@@ -484,6 +522,12 @@ def _upload_dump_slo(
     try:
         with local_path.open("rb") as fh:
             for i in range(1, n_segments + 1):
+                # Surface per-segment progress on the job record (best-effort).
+                _report_progress(
+                    progress_callback,
+                    f"Uploading dump (segment {i} of {n_segments})",
+                )
+
                 # Last segment may be smaller than segment_size.
                 remaining_in_file = file_size - segment_size * (i - 1)
                 this_segment_size = min(segment_size, remaining_in_file)
@@ -620,13 +664,13 @@ def _upload_dump_slo(
         # Composite etag verification.
         # Compute locally: md5(concat(seg_etag_ascii_bytes))
         composite_local = _compute_composite_etag([s["etag"] for s in uploaded])
-        
+
         # Swift returns just the hash on PUT manifest response, not the -N suffix.
-        # We strip the -N from our local composite if we appended it, or just 
+        # We strip the -N from our local composite if we appended it, or just
         # compare the raw hashes directly.
         # Remove any quotes or whitespace from swift's response
-        swift_composite = manifest_etag.strip('"\'-') 
-        
+        swift_composite = manifest_etag.strip('"\'-')
+
         composite_match = (swift_composite.lower() == composite_local.lower())
 
         _emit(log_event, "swift_slo_upload_verified", {

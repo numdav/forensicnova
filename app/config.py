@@ -11,6 +11,7 @@ INI sections handled:
     [swift]              object storage container name + SLO segment size
     [forensics]          DFIR project context
     [libvirt]            hypervisor connection URI
+    [jobs]               async job manager (Feature 3.5)
 
 Sensitive values:
   - keystone_authtoken_password: read from the INI file (mode 640 stack:stack)
@@ -19,12 +20,18 @@ Sensitive values:
 
 Derived paths:
   - secret_key_path: always ``{work_dir}/secret_key``.
+  - jobs_dir: ``{work_dir}/jobs`` unless explicitly set in [jobs].
 
 Feature 2 addition:
   - swift_slo_segment_size_bytes: threshold above which Swift Static Large
     Object (SLO) is used. The same value is also the size of each segment.
     Default 4 GiB; configurable in the [swift] section as
     ``slo_segment_size_bytes``.
+
+Feature 3.5 addition:
+  - jobs_dir: directory where the JobManager persists one JSON file per
+    async acquisition job. Defaults to ``{work_dir}/jobs``; the [jobs]
+    section is optional and only needed to override the default location.
 """
 from __future__ import annotations
 
@@ -69,6 +76,10 @@ class Config:
 
     # [libvirt] — hypervisor connection
     libvirt_uri: str = "qemu:///system"
+
+    # [jobs] — async job manager (Feature 3.5).
+    # Empty by default; load_config() derives it from work_dir when unset.
+    jobs_dir: str = ""
 
     # Flask — session signing key path (derived from work_dir in load_config)
     secret_key_path: str = f"{DEFAULT_WORK_DIR}/secret_key"
@@ -142,6 +153,14 @@ def load_config(path: Optional[str] = None) -> Config:
     if cp.has_section("libvirt"):
         cfg.libvirt_uri = cp.get("libvirt", "uri", fallback=cfg.libvirt_uri)
 
+    # [jobs] is optional: only present to override the default location.
+    if cp.has_section("jobs"):
+        cfg.jobs_dir = cp.get("jobs", "jobs_dir", fallback=cfg.jobs_dir)
+
     cfg.secret_key_path = os.path.join(cfg.work_dir, "secret_key")
+
+    # Derive jobs_dir from work_dir when it was not explicitly configured.
+    if not cfg.jobs_dir:
+        cfg.jobs_dir = os.path.join(cfg.work_dir, "jobs")
 
     return cfg

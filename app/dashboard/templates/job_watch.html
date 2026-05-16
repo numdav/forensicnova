@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}
+  Acquisition in progress — ForensicNova
+{% endblock %}
+
+{% block content %}
+
+{# --------------------------------------------------------------------- #}
+{#  Live job-watch page.                                                  #}
+{#                                                                        #}
+{#  The page is server-rendered once with whatever the job record looks   #}
+{#  like right now (so it is never blank on first paint), then the JS at  #}
+{#  the bottom polls /dashboard/jobs/<job_id>/status every 2 seconds and  #}
+{#  updates the DOM in place. On a terminal state:                        #}
+{#    - completed -> redirect to the acquisition detail page              #}
+{#    - failed    -> show the error, offer a link back to the list        #}
+{# --------------------------------------------------------------------- #}
+
+<div class="d-flex justify-content-between align-items-start mb-4">
+    <div>
+        <a href="{{ url_for('dashboard.acquisitions_list') }}"
+           class="text-body-secondary text-decoration-none small">
+            &larr; Back to acquisitions
+        </a>
+        <div class="mt-2 d-flex align-items-baseline gap-3">
+            <span class="fs-2 fw-semibold text-body">Acquisition job</span>
+            <span class="fs-5 fw-semibold text-info font-mono" id="job-instance-name">
+                {{ (job.instance_name if job else None) or '…' }}
+            </span>
+        </div>
+        <div class="small text-body-secondary mt-2">
+            <span class="text-body-secondary">Job ID:</span>
+            <span class="font-mono text-body">{{ job_id }}</span>
+        </div>
+    </div>
+    <div class="text-end">
+        <span class="badge fs-6" id="job-status-badge">
+            {{ (job.status if job else 'pending') | upper }}
+        </span>
+        <div class="small text-body-secondary mt-2 font-mono">
+            <span id="job-elapsed">{{ (job.elapsed_seconds if job else 0) }}</span> s elapsed
+        </div>
+    </div>
+</div>
+
+{# --------------------------------------------------------------------- #}
+{#  Progress card                                                         #}
+{# --------------------------------------------------------------------- #}
+<div class="card border-info-subtle mb-4" id="job-progress-card">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <strong class="d-block">Pipeline phase</strong>
+            <span class="font-mono small text-body-secondary" id="job-phase">
+                {{ (job.phase if job else 'queued') }}
+            </span>
+        </div>
+
+        <div class="progress mb-3" role="progressbar" style="height: 1.25rem;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated"
+                 id="job-progress-bar"
+                 style="width: 0%;">
+            </div>
+        </div>
+
+        <div class="p-3 rounded border border-info-subtle bg-body-tertiary">
+            <div class="small text-body-secondary mb-1">CURRENT STEP</div>
+            <div class="font-mono text-info fw-semibold" id="job-label">
+                {{ (job.label if job else 'Queued') }}
+            </div>
+        </div>
+    </div>
+</div>
+
+{# --------------------------------------------------------------------- #}
+{#  Failure card (hidden until status == failed)                          #}
+{# --------------------------------------------------------------------- #}
+<div class="card border-danger mb-4 d-none" id="job-error-card">
+    <div class="card-header bg-danger-subtle border-danger">
+        <strong class="text-danger-emphasis">Acquisition failed</strong>
+    </div>
+    <div class="card-body">
+        <p class="mb-3 font-mono small" id="job-error-message">—</p>
+        <a href="{{ url_for('dashboard.acquisitions_list') }}"
+           class="btn btn-outline-secondary">
+            Back to acquisitions
+        </a>
+        <a href="{{ url_for('dashboard.acquire') }}"
+           class="btn btn-outline-primary">
+            Start a new acquisition
+        </a>
+    </div>
+</div>
+
+{# --------------------------------------------------------------------- #}
+{#  Completion card (hidden until status == completed; JS also redirects) #}
+{# --------------------------------------------------------------------- #}
+<div class="card border-success mb-4 d-none" id="job-done-card">
+    <div class="card-header bg-success-subtle border-success">
+        <strong class="text-success-emphasis">Acquisition completed</strong>
+    </div>
+    <div class="card-body">
+        <p class="mb-3">
+            The acquisition finished successfully. Redirecting to the
+            acquisition detail page…
+        </p>
+        <a href="#" id="job-done-link" class="btn btn-success">
+            View acquisition report
+        </a>
+    </div>
+</div>
+
+{# --------------------------------------------------------------------- #}
+{#  Polling script                                                        #}
+{# --------------------------------------------------------------------- #}
+<script>
+(function () {
+    "use strict";
+
+    var JOB_ID       = {{ job_id | tojson }};
+    var STATUS_URL   = {{ url_for('dashboard.job_status', job_id=job_id) | tojson }};
+    var DETAIL_BASE  = {{ url_for('dashboard.acquisition_detail', acquisition_id='__ACQ__') | tojson }};
+    var POLL_MS      = 2000;
+
+    // Ordered pipeline phases -> progress percentage. 'queued' is 0%,
+    // 'completed' is 100%; the rest are spread across the middle.
+    var PHASE_PCT = {
+        "queued":              5,
+        "dumping_memory":      25,
+        "hashing":             45,
+        "collecting_metadata": 55,
+        "uploading_dump":      75,
+        "uploading_report":    90,
+        "finalizing":          95,
+        "completed":           100,
+        "failed":              100
+    };
+
+    var elName    = document.getElementById("job-instance-name");
+    var elBadge   = document.getElementById("job-status-badge");
+    var elElapsed = document.getElementById("job-elapsed");
+    var elPhase   = document.getElementById("job-phase");
+    var elLabel   = document.getElementById("job-label");
+    var elBar     = document.getElementById("job-progress-bar");
+    var cardErr   = document.getElementById("job-error-card");
+    var cardDone  = document.getElementById("job-done-card");
+    var cardProg  = document.getElementById("job-progress-card");
+    var elErrMsg  = document.getElementById("job-error-message");
+    var elDoneLnk = document.getElementById("job-done-link");
+
+    function badgeClass(status) {
+        if (status === "completed") return "badge fs-6 text-bg-success";
+        if (status === "failed")    return "badge fs-6 text-bg-danger";
+        if (status === "running")   return "badge fs-6 text-bg-info";
+        return "badge fs-6 text-bg-secondary"; // pending
+    }
+
+    function render(job) {
+        if (!job) { return; }
+
+        if (job.instance_name) { elName.textContent = job.instance_name; }
+        elBadge.textContent = (job.status || "pending").toUpperCase();
+        elBadge.className   = badgeClass(job.status);
+        elElapsed.textContent = (job.elapsed_seconds != null)
+            ? job.elapsed_seconds : 0;
+        elPhase.textContent = job.phase || "queued";
+        elLabel.textContent = job.label || "—";
+
+        var pct = PHASE_PCT[job.phase];
+        if (pct == null) { pct = 0; }
+        elBar.style.width = pct + "%";
+
+        if (job.status === "failed") {
+            elBar.classList.remove("progress-bar-animated");
+            elBar.classList.add("bg-danger");
+            elErrMsg.textContent = job.error_message || "Unknown error.";
+            cardErr.classList.remove("d-none");
+            return true; // terminal
+        }
+
+        if (job.status === "completed") {
+            elBar.classList.remove("progress-bar-animated");
+            elBar.classList.add("bg-success");
+            cardDone.classList.remove("d-none");
+            // acquisition_id is set on the job record by the worker thread.
+            if (job.acquisition_id) {
+                var url = DETAIL_BASE.replace("__ACQ__", job.acquisition_id);
+                elDoneLnk.setAttribute("href", url);
+                window.setTimeout(function () {
+                    window.location.href = url;
+                }, 1500);
+            }
+            return true; // terminal
+        }
+
+        return false; // still running
+    }
+
+    function poll() {
+        fetch(STATUS_URL, { headers: { "Accept": "application/json" } })
+            .then(function (resp) {
+                if (resp.status === 401) {
+                    window.location.href = {{ url_for('dashboard.login') | tojson }};
+                    return null;
+                }
+                return resp.json();
+            })
+            .then(function (job) {
+                if (!job) { return; }
+                if (job.error) {
+                    // status endpoint returned an error envelope
+                    elLabel.textContent = "Status check error: " + job.error;
+                    window.setTimeout(poll, POLL_MS);
+                    return;
+                }
+                var terminal = render(job);
+                if (!terminal) {
+                    window.setTimeout(poll, POLL_MS);
+                }
+            })
+            .catch(function (err) {
+                // Transient network hiccup — keep trying.
+                elLabel.textContent = "Reconnecting… (" + err + ")";
+                window.setTimeout(poll, POLL_MS);
+            });
+    }
+
+    // Kick off the first poll shortly after page load.
+    window.setTimeout(poll, 500);
+})();
+</script>
+
+{% endblock %}

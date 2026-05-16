@@ -6,6 +6,7 @@ from flask import (
     Response,
     current_app,
     flash,
+    jsonify,
     redirect,
     render_template,
     session,
@@ -21,7 +22,9 @@ from app.dashboard.api_client import (
     SessionRevokedError,
     download_pdf as api_download_pdf,
     get_acquisition,
+    get_job,
     list_acquisitions,
+    list_jobs,
     list_servers,
     stream_dump,
     stream_report,
@@ -78,7 +81,7 @@ def _handle_api_forbidden(exc: ApiForbiddenError):
 def _handle_api_not_found(exc: ApiNotFoundError):
     current_app.logger.info("api 404: %s", exc)
     flash(
-        "The requested acquisition was not found. It may have been "
+        "The requested resource was not found. It may have been "
         "removed from Swift, or the link is stale.",
         "warning",
     )
@@ -87,10 +90,10 @@ def _handle_api_not_found(exc: ApiNotFoundError):
 
 @dashboard_bp.errorhandler(AcquisitionError)
 def _handle_acquisition_failed(exc: AcquisitionError):
-    current_app.logger.error("acquisition failed: %s | detail=%s", exc, exc.detail)
+    current_app.logger.error("acquisition request failed: %s | detail=%s", exc, exc.detail)
     detail_reason = exc.detail.get("error", "unknown_error")
     flash(
-        f"Acquisition failed: {exc} (reason: {detail_reason}). "
+        f"Acquisition could not be started: {exc} (reason: {detail_reason}). "
         "See service logs for full diagnostic output.",
         "danger",
     )
@@ -222,7 +225,7 @@ def download_pdf(acquisition_id: str):
 
 # ---------------------------------------------------------------------------
 # GET  /dashboard/acquire   — render the trigger form
-# POST /dashboard/acquire   — fire the acquisition
+# POST /dashboard/acquire   — fire the acquisition (async)
 # ---------------------------------------------------------------------------
 
 @dashboard_bp.route("/acquire", methods=["GET", "POST"])
@@ -268,18 +271,28 @@ def acquire():
             target_id, picked.get("name"),
         )
 
+        # Async: the API returns 202 with a job_id. The heavy pipeline
+        # runs in the background; we hand the operator over to the
+        # job-watch page, which polls until the job reaches a terminal
+        # state and then redirects to the acquisition detail page.
         result = trigger_acquisition(target_id)
+        job_id = result.get("job_id")
 
-        acq_id = result.get("acquisition_id")
-        vm_name = result.get("instance_name") or picked.get("name")
-        size_mb = (result.get("size_bytes") or 0) / 1024 / 1024
+        if not job_id:
+            flash(
+                "The API accepted the request but returned no job id. "
+                "Check the service logs.",
+                "danger",
+            )
+            return redirect(url_for("dashboard.acquire"))
+
+        vm_name = picked.get("name") or "(unnamed)"
         flash(
-            f"Acquisition completed for {vm_name}: "
-            f"{size_mb:.1f} MB, MD5 {result.get('md5', '?')[:12]}… "
-            f"(integrity: {'verified' if result.get('etag_verified') else 'FAILED'}).",
-            "success",
+            f"Acquisition started for {vm_name}. "
+            f"Tracking job {job_id[:8]}…",
+            "info",
         )
-        return redirect(url_for("dashboard.acquisition_detail", acquisition_id=acq_id))
+        return redirect(url_for("dashboard.job_watch", job_id=job_id))
 
     return render_template(
         "acquire_form.html",
@@ -287,6 +300,60 @@ def acquire():
         servers=servers,
         active_count=len(active),
         total_count=len(servers),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /dashboard/jobs/<job_id>          — job-watch page (live progress)
+# GET /dashboard/jobs/<job_id>/status   — JSON status, polled by the page JS
+# ---------------------------------------------------------------------------
+
+@dashboard_bp.route("/jobs/<job_id>")
+@login_required
+def job_watch(job_id: str):
+    """Render the live progress page for an async acquisition job.
+
+    The initial server-side render fetches the job once so the page is
+    not blank on first paint; from then on the embedded JavaScript polls
+    /jobs/<job_id>/status every couple of seconds.
+    """
+    job = get_job(job_id)
+    return render_template("job_watch.html", job=job, job_id=job_id)
+
+
+@dashboard_bp.route("/jobs/<job_id>/status")
+@login_required
+def job_status(job_id: str):
+    """Return the current job record as JSON (consumed by job_watch.html JS).
+
+    Errors are returned as JSON too (never an HTML error page), so the
+    polling loop in the browser can handle them gracefully.
+    """
+    try:
+        job = get_job(job_id)
+    except ApiNotFoundError:
+        return jsonify(error="not_found", job_id=job_id), 404
+    except SessionRevokedError:
+        return jsonify(error="session_revoked"), 401
+    except ApiForbiddenError:
+        return jsonify(error="forbidden"), 403
+    except ApiUnavailableError as exc:
+        return jsonify(error="api_unavailable", detail=str(exc)), 503
+    return jsonify(job), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /dashboard/jobs/   — list all async jobs
+# ---------------------------------------------------------------------------
+
+@dashboard_bp.route("/jobs/")
+@login_required
+def jobs_list():
+    result = list_jobs()
+    return render_template(
+        "jobs_list.html",
+        jobs=result.get("jobs", []),
+        count=result.get("count", 0),
     )
 
 
