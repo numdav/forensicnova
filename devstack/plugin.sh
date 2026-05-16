@@ -204,8 +204,8 @@ forensicnova_ensure_container() {
 # hard-coding host:port.
 #
 # Idempotency:
-#   - the service entry uses 'openstack service create --or-show', which
-#     returns the existing entry instead of failing if it already exists;
+#   - the service entry is created only if 'openstack service show
+#     <type>' fails (no existing service of that type);
 #   - each endpoint is created only if 'openstack endpoint list' shows no
 #     existing endpoint of that interface for our service, so a re-run on
 #     a live cloud does not produce duplicates.
@@ -218,16 +218,25 @@ forensicnova_register_dfir_service() {
     forensicnova_log "extra" \
         "registering '${FORENSICNOVA_SERVICE_NAME}' service in Keystone catalog (${public_url}, region ${region})"
 
-    openstack service create \
-        --name "$FORENSICNOVA_SERVICE_NAME" \
-        --description "$FORENSICNOVA_SERVICE_DESCRIPTION" \
-        --or-show \
-        "$FORENSICNOVA_SERVICE_TYPE" >/dev/null \
-        || {
+    # Idempotent service creation: 'openstack service create' has no
+    # --or-show flag (unlike project/user/role create), so we must
+    # check-then-create explicitly. 'openstack service show <type>'
+    # exits 0 if a service of that type already exists, 1 otherwise.
+    if openstack service show "$FORENSICNOVA_SERVICE_TYPE" >/dev/null 2>&1; then
+        forensicnova_log "extra" \
+            "service '${FORENSICNOVA_SERVICE_NAME}' already present — skipping create"
+    else
+        if ! openstack service create \
+                --name "$FORENSICNOVA_SERVICE_NAME" \
+                --description "$FORENSICNOVA_SERVICE_DESCRIPTION" \
+                "$FORENSICNOVA_SERVICE_TYPE" >/dev/null; then
             forensicnova_log "extra" \
-                "WARNING: could not create/show service '${FORENSICNOVA_SERVICE_NAME}' — skipping endpoints"
+                "WARNING: could not create service '${FORENSICNOVA_SERVICE_NAME}' — skipping endpoints"
             return 0
-        }
+        fi
+        forensicnova_log "extra" \
+            "service '${FORENSICNOVA_SERVICE_NAME}' created (type=${FORENSICNOVA_SERVICE_TYPE})"
+    fi
 
     local iface existing
     for iface in public internal admin; do
