@@ -34,6 +34,68 @@ forensicnova_log() {
 }
 
 # =============================================================================
+# Repo synchronisation (Feature 3.5+)
+# =============================================================================
+
+# Sync /opt/stack/forensicnova to the latest origin/main commit.
+#
+# Why this exists:
+#   DevStack does not re-pull plugin repositories on subsequent stack.sh
+#   runs when the plugin directory already exists. The default RECLONE
+#   flag (False) means stack.sh trusts whatever code is on disk under
+#   /opt/stack/<plugin>. That breaks our iteration loop: we push to
+#   GitHub from /home/davide/projects/forensicnova, then re-stack, then
+#   discover the deployed code is stale because /opt/stack/forensicnova
+#   was last cloned days ago.
+#
+# What this function does:
+#   At pre-install time, if the deploy directory is a git checkout,
+#   fetch origin/main and hard-reset to it. The deployed code is now
+#   guaranteed to match the latest pushed commit.
+#
+# Safety:
+#   - Skipped on first stack (no .git directory yet — DevStack will clone
+#     fresh from local.conf's enable_plugin URL).
+#   - Hard reset is intentional: any uncommitted change in the deploy
+#     tree is overwritten. The whole point of the plugin model is that
+#     /opt/stack/forensicnova is a read-only mirror of origin/main; manual
+#     edits there are an anti-pattern and must not be preserved.
+#   - On fetch/reset failure (network down, GitHub rate-limit, etc.) the
+#     function logs a WARNING and continues with the on-disk code instead
+#     of aborting the stack. Better stale-but-running than no-stack-at-all.
+forensicnova_sync_repo() {
+    if [[ ! -d "${FORENSICNOVA_DIR}/.git" ]]; then
+        forensicnova_log "pre-install" \
+            "no .git in ${FORENSICNOVA_DIR} — first-time clone will be done by DevStack, skipping sync"
+        return 0
+    fi
+
+    local before
+    before=$(sudo -u "$STACK_USER" git -C "$FORENSICNOVA_DIR" log -1 --oneline 2>/dev/null || echo "unknown")
+    forensicnova_log "pre-install" "current deploy HEAD: ${before}"
+
+    if ! sudo -u "$STACK_USER" git -C "$FORENSICNOVA_DIR" fetch --quiet origin main 2>&1; then
+        forensicnova_log "pre-install" \
+            "WARNING: git fetch failed; continuing with on-disk code (${before})"
+        return 0
+    fi
+
+    if ! sudo -u "$STACK_USER" git -C "$FORENSICNOVA_DIR" reset --hard --quiet origin/main 2>&1; then
+        forensicnova_log "pre-install" \
+            "WARNING: git reset failed; continuing with on-disk code (${before})"
+        return 0
+    fi
+
+    local after
+    after=$(sudo -u "$STACK_USER" git -C "$FORENSICNOVA_DIR" log -1 --oneline 2>/dev/null || echo "unknown")
+    if [[ "$before" == "$after" ]]; then
+        forensicnova_log "pre-install" "deploy already up to date (${after})"
+    else
+        forensicnova_log "pre-install" "synced ${before}  ->  ${after}"
+    fi
+}
+
+# =============================================================================
 # Idempotent building blocks
 # =============================================================================
 
@@ -372,6 +434,7 @@ forensicnova_start_service() {
 
 preinstall_forensicnova() {
     forensicnova_marker "pre-install"
+    forensicnova_sync_repo
     if ! command -v virsh >/dev/null 2>&1; then
         forensicnova_log "pre-install" \
             "WARNING: virsh not found — memory acquisition requires libvirt on the compute node"
