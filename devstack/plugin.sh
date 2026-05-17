@@ -3,13 +3,25 @@
 # https://github.com/numdav/forensicnova
 #
 # Lifecycle phases wired in this file:
-#   stack pre-install   -> preinstall_forensicnova  (system packages)
-#   stack install       -> install_forensicnova     (python venv + pip deps)
-#   stack post-config   -> configure_forensicnova   (dirs, conf file, openrc, secret_key)
-#   stack extra         -> init_forensicnova        (keystone identity, swift,
-#                                                    service catalog, systemd)
-#   unstack             -> stop_forensicnova        (stop unit, drop service catalog)
-#   clean               -> cleanup_forensicnova     (remove unit + data)
+#
+#   Backend (service "forensicnova"):
+#     stack pre-install   -> preinstall_forensicnova  (system packages)
+#     stack install       -> install_forensicnova     (python venv + pip deps)
+#     stack post-config   -> configure_forensicnova   (dirs, conf file, openrc, secret_key)
+#     stack extra         -> init_forensicnova        (keystone identity, swift,
+#                                                      service catalog, systemd)
+#     unstack             -> stop_forensicnova        (stop unit, drop service catalog)
+#     clean               -> cleanup_forensicnova     (remove unit + data)
+#
+#   Dashboard (service "forensicnova-dashboard", Feature 4):
+#     stack install       -> install_forensicnova_dashboard      (pip install -e
+#                                                                 into Horizon venv)
+#     stack post-config   -> configure_forensicnova_dashboard    (copy enabled/,
+#                                                                 collectstatic, compress)
+#     stack extra         -> init_forensicnova_dashboard         (restart Horizon)
+#     unstack             -> stop_forensicnova_dashboard         (remove enabled/)
+#     clean               -> cleanup_forensicnova_dashboard      (remove enabled/ +
+#                                                                 uninstall pkg)
 
 FORENSICNOVA_PLUGIN_DIR=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")")
 # shellcheck disable=SC1091
@@ -31,6 +43,12 @@ forensicnova_marker() {
 forensicnova_log() {
     local phase="$1"; shift
     echo "[ForensicNova][${phase}] $*"
+}
+
+# Dashboard-specific log prefix to make journalctl filtering easier.
+fdash_log() {
+    local phase="$1"; shift
+    echo "[ForensicNova-Dashboard][${phase}] $*"
 }
 
 # =============================================================================
@@ -63,6 +81,12 @@ forensicnova_log() {
 #   - On fetch/reset failure (network down, GitHub rate-limit, etc.) the
 #     function logs a WARNING and continues with the on-disk code instead
 #     of aborting the stack. Better stale-but-running than no-stack-at-all.
+#
+# Monorepo note (Feature 4):
+#   This function syncs the WHOLE repo. Since the Horizon dashboard now
+#   lives in the same repo (under forensicnova_dashboard/), a single
+#   git reset --hard re-aligns both backend AND dashboard code in one
+#   shot. No additional sync logic is needed for the dashboard.
 forensicnova_sync_repo() {
     if [[ ! -d "${FORENSICNOVA_DIR}/.git" ]]; then
         forensicnova_log "pre-install" \
@@ -96,7 +120,7 @@ forensicnova_sync_repo() {
 }
 
 # =============================================================================
-# Idempotent building blocks
+# Backend — Idempotent building blocks
 # =============================================================================
 
 forensicnova_ensure_dirs() {
@@ -438,7 +462,7 @@ forensicnova_start_service() {
 }
 
 # =============================================================================
-# Phase functions
+# Backend — Phase functions
 # =============================================================================
 
 preinstall_forensicnova() {
@@ -514,19 +538,189 @@ cleanup_forensicnova() {
 }
 
 # =============================================================================
-# Dispatcher
+# Dashboard (Feature 4) — Idempotent building blocks
+# =============================================================================
+#
+# The dashboard is a Horizon (Django) plugin. It is installed into Horizon's
+# venv (NOT the backend venv) via `pip install -e`, and it registers its
+# panels by dropping _9NNN_*.py files into Horizon's `local/enabled/` dir.
+# Horizon auto-discovers them at Django startup.
+
+# Probe for Horizon's Python interpreter / pip. DevStack-deployed Horizon
+# typically uses /opt/stack/data/venv (the shared services venv); we fall
+# back to /usr/local/bin and /usr/bin only as a safety net.
+FORENSICNOVA_DASHBOARD_PIP=""
+
+fdash_locate_horizon_pip() {
+    local candidates=(
+        "/opt/stack/data/venv/bin/pip"
+        "/usr/local/bin/pip3"
+        "/usr/bin/pip3"
+    )
+    local p
+    for p in "${candidates[@]}"; do
+        if [[ -x "$p" ]]; then
+            FORENSICNOVA_DASHBOARD_PIP="$p"
+            fdash_log "install" "using pip at ${FORENSICNOVA_DASHBOARD_PIP}"
+            return 0
+        fi
+    done
+    fdash_log "install" "ERROR: no pip found in expected locations"
+    return 1
+}
+
+# `pip install -e` operates on the directory containing setup.cfg/setup.py.
+# In the monorepo this is FORENSICNOVA_DIR (== FORENSICNOVA_DASHBOARD_DIR).
+# The setup.cfg [options.packages.find] include=forensicnova_dashboard*
+# rule ensures only the dashboard package is installed, NOT the backend's
+# app/ package — which lives in the same directory but belongs to a
+# separate venv and must stay out of Horizon's Python path.
+fdash_install_package() {
+    fdash_log "install" "installing forensicnova-dashboard (editable) into Horizon's venv"
+    fdash_locate_horizon_pip || return 1
+    sudo "$FORENSICNOVA_DASHBOARD_PIP" install --quiet --disable-pip-version-check \
+        -e "$FORENSICNOVA_DASHBOARD_DIR"
+}
+
+fdash_uninstall_package() {
+    fdash_locate_horizon_pip 2>/dev/null || return 0
+    fdash_log "clean" "uninstalling forensicnova-dashboard from Horizon's venv"
+    sudo "$FORENSICNOVA_DASHBOARD_PIP" uninstall -y forensicnova-dashboard 2>/dev/null || true
+}
+
+# Drop the _9NNN_*.py registration files into Horizon's local/enabled/
+# directory. Horizon scans this dir at Django startup and imports every
+# matching file: each one registers a Dashboard, PanelGroup or Panel.
+fdash_install_enabled_files() {
+    fdash_log "post-config" "copying enabled/ files to ${HORIZON_LOCAL_ENABLED_DIR}"
+    sudo mkdir -p "$HORIZON_LOCAL_ENABLED_DIR"
+    local f
+    for f in "$FORENSICNOVA_DASHBOARD_DIR"/forensicnova_dashboard/enabled/_*.py; do
+        [[ -f "$f" ]] || continue
+        local target="${HORIZON_LOCAL_ENABLED_DIR}/$(basename "$f")"
+        sudo install -m 644 "$f" "$target"
+        fdash_log "post-config" "installed $(basename "$f")"
+    done
+}
+
+fdash_remove_enabled_files() {
+    fdash_log "clean" "removing forensicnova-dashboard enabled/ files"
+    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9000_dfir.py
+    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9010_dfir_forensics_panelgroup.py
+    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9020_dfir_acquisitions.py
+    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9030_dfir_new_acquisition.py
+}
+
+# Horizon serves static assets (CSS, JS) from a Django collectstatic dir.
+# Adding a new dashboard introduces new templates (and possibly static
+# files); we run collectstatic + compress so Apache picks them up.
+# Failure here is non-fatal: Horizon still runs, only the new dashboard's
+# assets might 404 until the next successful stack.
+fdash_collectstatic_and_compress() {
+    fdash_log "post-config" "running collectstatic + compress for Horizon"
+    local manage_py="${DEST}/horizon/manage.py"
+    if [[ ! -f "$manage_py" ]]; then
+        fdash_log "post-config" "WARNING: manage.py not found at ${manage_py} — skipping"
+        return 0
+    fi
+    local python_bin
+    if [[ -x "/opt/stack/data/venv/bin/python" ]]; then
+        python_bin="/opt/stack/data/venv/bin/python"
+    else
+        python_bin="$(command -v python3)"
+    fi
+    sudo -u "$STACK_USER" "$python_bin" "$manage_py" collectstatic \
+        --noinput >/dev/null 2>&1 \
+        || fdash_log "post-config" "collectstatic returned non-zero (ignored)"
+    sudo -u "$STACK_USER" "$python_bin" "$manage_py" compress \
+        --force >/dev/null 2>&1 \
+        || fdash_log "post-config" "compress returned non-zero (ignored)"
+}
+
+# Horizon runs inside Apache (mod_wsgi). The DevStack systemd unit
+# `devstack@horizon.service` is cosmetic on modern DevStack: the actual
+# process is Apache. We try systemctl restart first (works on some
+# layouts), fall back to `service apache2 restart`.
+fdash_restart_horizon() {
+    local unit="devstack@horizon.service"
+    fdash_log "extra" "restarting ${unit} (or apache2)"
+    sudo systemctl restart "$unit" 2>/dev/null || \
+        sudo service apache2 restart 2>/dev/null || \
+        fdash_log "extra" "WARNING: could not restart Horizon (no systemd unit, no apache2)"
+    sleep 2
+}
+
+# =============================================================================
+# Dashboard — Phase functions
 # =============================================================================
 
-if [[ "$1" == "stack" ]]; then
-    case "$2" in
-        pre-install)  preinstall_forensicnova ;;
-        install)      install_forensicnova ;;
-        post-config)  configure_forensicnova ;;
-        extra)        init_forensicnova ;;
-        *)            : ;;
-    esac
-elif [[ "$1" == "unstack" ]]; then
-    stop_forensicnova
-elif [[ "$1" == "clean" ]]; then
-    cleanup_forensicnova
+install_forensicnova_dashboard() {
+    fdash_log "install" "phase: install"
+    fdash_install_package
+}
+
+configure_forensicnova_dashboard() {
+    fdash_log "post-config" "phase: post-config"
+    fdash_install_enabled_files
+    fdash_collectstatic_and_compress
+}
+
+init_forensicnova_dashboard() {
+    fdash_log "extra" "phase: extra"
+    fdash_restart_horizon
+}
+
+stop_forensicnova_dashboard() {
+    fdash_log "unstack" "phase: unstack"
+    # Horizon is restarted by the main DevStack unstack flow; we just
+    # remove our enabled/ entries so that if a partial unstack happens,
+    # Horizon comes back clean of stale DFIR panels.
+    fdash_remove_enabled_files
+}
+
+cleanup_forensicnova_dashboard() {
+    fdash_log "clean" "phase: clean"
+    fdash_remove_enabled_files
+    fdash_uninstall_package
+}
+
+# =============================================================================
+# Dispatcher
+# =============================================================================
+#
+# Two independent service flags drive two independent lifecycles. Each
+# block is guarded by `is_service_enabled`, so the operator can disable
+# either side from local.conf with `disable_service`.
+
+# --- Backend dispatcher ---
+if is_service_enabled forensicnova; then
+    if [[ "$1" == "stack" ]]; then
+        case "$2" in
+            pre-install)  preinstall_forensicnova ;;
+            install)      install_forensicnova ;;
+            post-config)  configure_forensicnova ;;
+            extra)        init_forensicnova ;;
+            *)            : ;;
+        esac
+    elif [[ "$1" == "unstack" ]]; then
+        stop_forensicnova
+    elif [[ "$1" == "clean" ]]; then
+        cleanup_forensicnova
+    fi
+fi
+
+# --- Dashboard dispatcher (Feature 4) ---
+if is_service_enabled forensicnova-dashboard; then
+    if [[ "$1" == "stack" ]]; then
+        case "$2" in
+            install)      install_forensicnova_dashboard ;;
+            post-config)  configure_forensicnova_dashboard ;;
+            extra)        init_forensicnova_dashboard ;;
+            *)            : ;;
+        esac
+    elif [[ "$1" == "unstack" ]]; then
+        stop_forensicnova_dashboard
+    elif [[ "$1" == "clean" ]]; then
+        cleanup_forensicnova_dashboard
+    fi
 fi

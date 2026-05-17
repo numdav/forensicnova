@@ -51,5 +51,20 @@ FORENSICNOVA_JOBS_DIR=${FORENSICNOVA_JOBS_DIR:-$FORENSICNOVA_WORK_DIR/jobs}
 # --- Generated openrc for testing as dfir-tester ---
 FORENSICNOVA_OPENRC=${FORENSICNOVA_OPENRC:-$DEST/devstack/openrc-dfir}
 
+# --- Feature 4 — Horizon dashboard plugin ---
+# Monorepo: the Horizon dashboard package (forensicnova_dashboard/) lives
+# at the root of the same git repo as the backend (app/). So this directory
+# resolves to the same path as FORENSICNOVA_DIR — both setup.cfg and
+# pip install -e operate from there.
+FORENSICNOVA_DASHBOARD_DIR=${FORENSICNOVA_DASHBOARD_DIR:-$FORENSICNOVA_DIR}
+
+# Where Horizon discovers third-party panel registration files
+# (the _9NNN_*.py drop-ins). Standard path on DevStack-deployed Horizon.
+HORIZON_LOCAL_ENABLED_DIR=${HORIZON_LOCAL_ENABLED_DIR:-$DEST/horizon/openstack_dashboard/local/enabled}
+
 # --- DevStack service registration ---
+# Two service flags from a single plugin: each branch of plugin.sh
+# guards itself with `is_service_enabled`, so dashboards can be turned
+# off independently from the backend via `disable_service` in local.conf.
 enable_service forensicnova
+enable_service forensicnova-dashboard

@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "New acquisition" %}{% endblock %}
+
+{% block page_header %}
+    {% include "horizon/common/_page_header.html" with title=_("New acquisition") %}
+{% endblock page_header %}
+
+{% block main %}
+<div class="content_body">
+
+<form method="post" action="{% url 'horizon:dfir:new_acquisition:index' %}"
+      class="form-horizontal">
+    {% csrf_token %}
+
+    <div class="form-group">
+        <label for="id_instance_id" class="col-sm-2 control-label">
+            {{ form.instance_id.label }}
+        </label>
+        <div class="col-sm-8">
+            {{ form.instance_id }}
+            <p class="help-block">{{ form.instance_id.help_text }}</p>
+            {% for error in form.instance_id.errors %}
+                <p class="text-danger">{{ error }}</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="alert alert-info" role="alert">
+        <strong>{% trans "Note." %}</strong>
+        {% blocktrans %}
+        Acquisitions of large RAM (8+ GiB) can take several minutes:
+        the dump is taken on the hypervisor (no guest writes), then
+        hashed and uploaded to Swift in segments. The next page will
+        show live progress.
+        {% endblocktrans %}
+    </div>
+
+    <div class="form-group">
+        <div class="col-sm-offset-2 col-sm-8">
+            <button type="submit" class="btn btn-primary">
+                {% trans "Start acquisition" %}
+            </button>
+            <a href="{% url 'horizon:dfir:acquisitions:index' %}"
+               class="btn btn-default">
+                {% trans "Cancel" %}
+            </a>
+        </div>
+    </div>
+</form>
+
+</div>
+{% endblock %}

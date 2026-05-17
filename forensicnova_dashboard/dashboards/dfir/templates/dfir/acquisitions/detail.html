@@ -1,0 +1,154 @@
+{% extends 'base.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Acquisition" %} {{ acquisition_id }}{% endblock %}
+
+{% block page_header %}
+    {% include "horizon/common/_page_header.html" with title=_("Acquisition detail") %}
+{% endblock page_header %}
+
+{% block main %}
+<div class="content_body">
+
+{% if not report %}
+    <div class="alert alert-warning">
+        {% trans "Acquisition not found or unavailable." %}
+        <a href="{% url 'horizon:dfir:acquisitions:index' %}">
+            {% trans "Back to acquisitions" %}
+        </a>
+    </div>
+{% else %}
+
+<div class="row">
+  <div class="col-md-8">
+    <h3>{{ report.instance.name }}
+        <small class="text-muted font-monospace">{{ report.acquisition_id }}</small>
+    </h3>
+    <p class="text-muted small">
+        {% trans "Operator" %}: <strong>{{ report.operator }}</strong>
+        &nbsp;·&nbsp;
+        {% trans "Started" %}: {{ report.timestamps.started_at }}
+        &nbsp;·&nbsp;
+        {% trans "Duration" %}: {{ report.timestamps.duration_seconds }} s
+        &nbsp;·&nbsp;
+        {% trans "Schema" %}: v{{ report.schema_version }}
+    </p>
+  </div>
+  <div class="col-md-4 text-right">
+      <a href="{% url 'horizon:dfir:acquisitions:download_pdf' report.acquisition_id %}"
+         class="btn btn-default">
+         {% trans "Download PDF" %}
+      </a>
+      <a href="{% url 'horizon:dfir:acquisitions:download_json' report.acquisition_id %}"
+         class="btn btn-default">
+         {% trans "Download JSON" %}
+      </a>
+      <a href="{% url 'horizon:dfir:acquisitions:download_dump' report.acquisition_id %}"
+         class="btn btn-warning">
+         {% trans "Download dump" %}
+      </a>
+  </div>
+</div>
+
+<hr>
+
+{# ----------- Evidence ----------- #}
+<h4>{% trans "Evidence (dump)" %}</h4>
+<table class="table table-condensed">
+    <tbody>
+    <tr><th>{% trans "Size" %}</th><td>{{ report.dump.size_bytes }} bytes</td></tr>
+    <tr><th>{% trans "MD5" %}</th><td class="font-monospace">{{ report.dump.md5 }}</td></tr>
+    <tr><th>{% trans "SHA-1" %}</th><td class="font-monospace">{{ report.dump.sha1 }}</td></tr>
+    <tr><th>{% trans "Swift object" %}</th><td class="font-monospace">{{ report.dump.swift_object }}</td></tr>
+    <tr><th>{% trans "Swift etag" %}</th><td class="font-monospace">{{ report.dump.swift_etag }}</td></tr>
+    <tr><th>{% trans "Integrity verified" %}</th>
+        <td>
+        {% if report.dump.etag_verified %}
+            <span class="label label-success">{% trans "verified" %}</span>
+        {% else %}
+            <span class="label label-danger">{% trans "FAILED" %}</span>
+        {% endif %}
+        </td></tr>
+    <tr><th>{% trans "Upload method" %}</th><td>{{ report.dump.upload_method }}</td></tr>
+    {% if report.dump.slo_segments %}
+    <tr><th>{% trans "SLO segments" %}</th><td>{{ report.dump.slo_segments|length }}</td></tr>
+    {% endif %}
+    </tbody>
+</table>
+
+{# ----------- Target system ----------- #}
+<h4>{% trans "Target system" %}</h4>
+<div class="row">
+    {# Nova #}
+    <div class="col-md-3">
+        <h5>{% trans "Nova" %}</h5>
+        <dl>
+        <dt>{% trans "Status" %}</dt><dd>{{ report.target_system.nova.status|default:"—" }}</dd>
+        <dt>{% trans "Host" %}</dt><dd>{{ report.target_system.nova.host|default:"—" }}</dd>
+        <dt>{% trans "Hypervisor" %}</dt><dd>{{ report.target_system.nova.hypervisor_hostname|default:"—" }}</dd>
+        </dl>
+    </div>
+    {# Flavor #}
+    <div class="col-md-3">
+        <h5>{% trans "Flavor" %}</h5>
+        <dl>
+        <dt>{% trans "Name" %}</dt><dd>{{ report.target_system.flavor.name|default:"—" }}</dd>
+        <dt>{% trans "RAM" %}</dt><dd>{{ report.target_system.flavor.ram_mb|default:"—" }} MiB</dd>
+        <dt>{% trans "vCPUs" %}</dt><dd>{{ report.target_system.flavor.vcpus|default:"—" }}</dd>
+        <dt>{% trans "Disk" %}</dt><dd>{{ report.target_system.flavor.disk_gb|default:"—" }} GiB</dd>
+        </dl>
+    </div>
+    {# Glance — with v1.3 triage fields #}
+    <div class="col-md-3">
+        <h5>{% trans "Glance image" %}</h5>
+        <dl>
+        <dt>{% trans "Name" %}</dt><dd>{{ report.target_system.glance.name|default:"—" }}</dd>
+        <dt>{% trans "Visibility" %}</dt>
+        <dd>
+            {% if report.target_system.glance.visibility == "not_visible" %}
+                <span class="label label-warning">not visible</span>
+            {% else %}
+                {{ report.target_system.glance.visibility|default:"—" }}
+            {% endif %}
+        </dd>
+        <dt>{% trans "Owner" %}</dt><dd class="font-monospace">{{ report.target_system.glance.owner|default:"—" }}</dd>
+        <dt>{% trans "OS distro" %}</dt><dd>{{ report.target_system.glance.os_distro|default:"—" }}</dd>
+        <dt>{% trans "Architecture" %}</dt><dd>{{ report.target_system.glance.architecture|default:"—" }}</dd>
+        </dl>
+    </div>
+    {# libvirt #}
+    <div class="col-md-3">
+        <h5>{% trans "libvirt" %}</h5>
+        <dl>
+        <dt>{% trans "Domain" %}</dt><dd class="font-monospace">{{ report.target_system.libvirt.domain_name|default:"—" }}</dd>
+        <dt>{% trans "Architecture" %}</dt><dd>{{ report.target_system.libvirt.architecture|default:"—" }}</dd>
+        <dt>{% trans "Machine type" %}</dt><dd>{{ report.target_system.libvirt.machine_type|default:"—" }}</dd>
+        <dt>{% trans "Memory" %}</dt><dd>{{ report.target_system.libvirt.memory_mb|default:"—" }} MiB</dd>
+        </dl>
+    </div>
+</div>
+
+{# ----------- Chain of custody ----------- #}
+<h4>{% trans "Chain of custody" %}
+    <small class="text-muted">({{ report.chain_of_custody.total_events }} events)</small>
+</h4>
+<table class="table table-condensed table-striped">
+    <thead>
+        <tr><th>#</th><th>{% trans "Timestamp" %}</th><th>{% trans "Event" %}</th><th>{% trans "Description" %}</th></tr>
+    </thead>
+    <tbody>
+    {% for ev in report.chain_of_custody.events %}
+        <tr>
+            <td>{{ ev.seq }}</td>
+            <td class="font-monospace small">{{ ev.timestamp }}</td>
+            <td><span class="label label-default">{{ ev.event_type }}</span></td>
+            <td>{{ ev.description }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% endif %}
+
+</div>
+{% endblock %}
