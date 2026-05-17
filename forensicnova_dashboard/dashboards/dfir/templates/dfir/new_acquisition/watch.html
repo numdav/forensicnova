@@ -83,6 +83,13 @@
 (function () {
     var POLL_URL = "{{ poll_url|escapejs }}";
     var ACQ_INDEX_URL = "{{ acquisitions_index_url|escapejs }}";
+    // URL template built server-side via Django reverse() with a
+    // placeholder. We substitute the real acquisition_id at runtime,
+    // so the URL pattern stays a single source of truth in urls.py
+    // and we never hardcode the dashboard URL prefix in JavaScript.
+    var ACQ_DETAIL_URL_TEMPLATE =
+        "{{ acquisition_detail_url_template|escapejs }}";
+    var ACQ_ID_PLACEHOLDER = "__ACQ_ID__";
     var POLL_MS = 2000;
 
     function $(id) { return document.getElementById(id); }
@@ -133,7 +140,8 @@
                 if (acqId) {
                     setTimeout(function () {
                         window.location =
-                            "/dashboard/dfir/acquisitions/" + acqId + "/";
+                            ACQ_DETAIL_URL_TEMPLATE.replace(
+                                ACQ_ID_PLACEHOLDER, acqId);
                     }, 1500);
                 }
                 return;

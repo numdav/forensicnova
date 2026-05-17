@@ -100,6 +100,14 @@ class NewAcquisitionView(generic.FormView):
         )
 
 
+# Placeholder used inside reverse() to build a URL template the watch
+# page's JS can later substitute with the real acquisition_id. Using a
+# placeholder + JS replace() lets us keep Django reverse() as the
+# single source of truth for the URL pattern, without hardcoding the
+# /dashboard/dfir/... prefix in JavaScript.
+_ACQ_ID_PLACEHOLDER = "__ACQ_ID__"
+
+
 class JobWatchView(generic.TemplateView):
     template_name = "dfir/new_acquisition/watch.html"
     page_title = _("Acquisition in progress")
@@ -146,6 +154,14 @@ class JobWatchView(generic.TemplateView):
         )
         ctx["acquisitions_index_url"] = reverse(
             "horizon:dfir:acquisitions:index",
+        )
+        # Template URL the watch JS will use to redirect to the
+        # acquisition detail page once the job completes. Built via
+        # Django reverse() with a placeholder so the JS only does a
+        # plain string replace — no hardcoded URL prefix in JavaScript.
+        ctx["acquisition_detail_url_template"] = reverse(
+            "horizon:dfir:acquisitions:detail",
+            args=(_ACQ_ID_PLACEHOLDER,),
         )
         return ctx
 
