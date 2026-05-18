@@ -23,7 +23,7 @@ Two views:
   Why no fake percentages: libvirt does not expose dump progress; the
   hash phase is fast; only SLO segments give exact step counts. We
   intentionally show only "phase + elapsed", which is honest to what
-  the backend can actually report. (See ForensicNova F3.5 design.)
+  the backend can actually report.
 """
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ class JobWatchView(generic.TemplateView):
         try:
             job = fn_api.get_job(self.request, job_id)
             ctx["initial_status"] = job.get("status")
-            # Backend F3.5 job record exposes the human-readable phase
+            # The backend job record exposes the human-readable phase
             # label under the key 'label' (and the machine-readable phase
             # under 'phase'). Older versions of this template referred
             # to a non-existent 'phase_label' key.

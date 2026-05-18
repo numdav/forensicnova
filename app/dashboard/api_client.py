@@ -8,7 +8,7 @@ Error taxonomy raised to views (all inherit from ApiClientError):
   - ApiUnavailableError : transport or other 5xx
   - ApiClientError      : other 4xx
 
-Feature 3.5 — async acquisition:
+Async acquisition support:
   trigger_acquisition() now expects HTTP 202 from the API: the POST
   returns immediately with a job_id and the pipeline runs in the
   background. The view layer redirects the operator to the job-watch

@@ -32,10 +32,8 @@ class Dfir(horizon.Dashboard):
     # Cross-tenant Nova read visibility for the analyst is implemented
     # in the ForensicNova plugin by granting the 'admin' role on every
     # existing project to the dfir-tester user. This is a pragmatic
-    # prototype workaround. A least-privilege Nova policy.yaml override
-    # (originally planned as Feature 3) is deferred
-    # because Nova 2026.2 enforce_new_defaults=True breaks the
-    # classic policy.yaml override path.
+    # prototype workaround; production deployments may want to tighten
+    # the grant.
     permissions = ("openstack.roles.forensic_analyst",)
 
 

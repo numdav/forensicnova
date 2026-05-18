@@ -413,7 +413,7 @@ def render_evidence(report):
                        else 'unknown'))],
     ]
 
-    # SLO readiness: if a future Feature 2 dump uses upload_method == "slo",
+    # SLO upload metadata: if the dump used upload_method == "slo",
     # show segment composition. Older v1.1 reports do not carry these
     # fields and the block is silently skipped.
     upload_method = dump.get('upload_method')

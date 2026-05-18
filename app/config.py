@@ -11,7 +11,7 @@ INI sections handled:
     [swift]              object storage container name + SLO segment size
     [forensics]          DFIR project context
     [libvirt]            hypervisor connection URI
-    [jobs]               async job manager (Feature 3.5)
+    [jobs]               async job manager
 
 Sensitive values:
   - keystone_authtoken_password: read from the INI file (mode 640 stack:stack)
@@ -22,13 +22,13 @@ Derived paths:
   - secret_key_path: always ``{work_dir}/secret_key``.
   - jobs_dir: ``{work_dir}/jobs`` unless explicitly set in [jobs].
 
-Feature 2 addition:
+SLO upload threshold:
   - swift_slo_segment_size_bytes: threshold above which Swift Static Large
     Object (SLO) is used. The same value is also the size of each segment.
     Default 4 GiB; configurable in the [swift] section as
     ``slo_segment_size_bytes``.
 
-Feature 3.5 addition:
+Async job manager directory:
   - jobs_dir: directory where the JobManager persists one JSON file per
     async acquisition job. Defaults to ``{work_dir}/jobs``; the [jobs]
     section is optional and only needed to override the default location.
@@ -77,7 +77,7 @@ class Config:
     # [libvirt] — hypervisor connection
     libvirt_uri: str = "qemu:///system"
 
-    # [jobs] — async job manager (Feature 3.5).
+    # [jobs] — async job manager.
     # Empty by default; load_config() derives it from work_dir when unset.
     jobs_dir: str = ""
 

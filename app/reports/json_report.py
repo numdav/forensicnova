@@ -4,7 +4,7 @@ Produces the machine-readable report that travels with the dump as a
 second Swift object and that downstream forensic tools consume for
 hash verification and analysis routing.
 
-Schema v1.2 (Feature 2):
+Schema v1.2:
 
   Identical to v1.1 plus, inside the ``dump`` block:
     - ``upload_method``: "single_put" | "slo"
@@ -72,7 +72,7 @@ log = logging.getLogger("forensicnova.reports.json")
 SCHEMA_VERSION = "1.2"
 
 _EVENT_DESCRIPTIONS = {
-    # --- Pre-Feature-2 events (unchanged) ----------------------------------
+    # --- Single-PUT upload events -------------------------------------------
     "api_request_received":           "REST endpoint received the acquisition request",
     "acquisition_initiated":          "Acquisition pipeline started — instance identified",
     "domain_lookup_completed":        "Nova UUID resolved to libvirt domain",
@@ -89,7 +89,7 @@ _EVENT_DESCRIPTIONS = {
     "local_dump_preserved":           "Local dump intentionally NOT deleted (integrity failure)",
     "acquisition_failed":             "Acquisition pipeline aborted — see data.reason",
 
-    # --- Feature 2 events (Swift Static Large Object) ----------------------
+    # --- SLO upload events (Swift Static Large Object) ----------------------
     "slo_upload_started":             "SLO upload started — file split into segments",
     "swift_segment_uploaded":         "Segment uploaded and per-segment ETag verified locally",
     "swift_manifest_uploaded":        "SLO manifest PUT — Swift validated all segments server-side",

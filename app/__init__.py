@@ -58,7 +58,7 @@ Design rationale:
      tokens would break them.  Only the dashboard blueprint is actually
      CSRF-protected, since only it consumes HTML forms with cookie auth.
 
-6. Async job manager (Feature 3.5)
+6. Async job manager
    - A single JobManager instance lives in app.config["FORENSICNOVA_JOBS"].
    - It is created here, with the jobs directory derived from cfg.work_dir
      (default /var/lib/forensicnova/jobs).
@@ -176,7 +176,7 @@ def _configure_session(app: Flask, cfg: Config) -> None:
 
 
 def _init_jobs(app: Flask, cfg: Config) -> None:
-    """Initialise the JobManager and recover orphan jobs (Feature 3.5)."""
+    """Initialise the JobManager and recover orphan jobs."""
     from app.jobs import JobManager
 
     jobs_dir = cfg.jobs_dir or os.path.join(cfg.work_dir, "jobs")

@@ -264,7 +264,7 @@ def stream_pdf(request, acquisition_id: str) -> requests.Response:
 def stream_json_report(request, acquisition_id: str) -> requests.Response:
     """Streaming GET for the JSON report download.
 
-    Backend F3.5 exposes this endpoint without a file extension
+    Backend exposes this endpoint without a file extension
     (route ``download_acquisition_report`` in app/api/v1.py).
     """
     return _stream(request, f"/api/v1/acquisitions/{acquisition_id}/report")

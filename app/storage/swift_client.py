@@ -20,7 +20,7 @@ Credentials:
     (injected by the systemd unit's Environment= directive written by
     devstack/plugin.sh).
 
-Upload strategy (Feature 2 - SLO):
+Upload strategy:
   - Files <  SIMPLE_UPLOAD_THRESHOLD (default 4 GiB): single PUT,
     ETag = MD5(content).
   - Files >= SIMPLE_UPLOAD_THRESHOLD                : Swift Static Large
@@ -59,7 +59,7 @@ Upload strategy (Feature 2 - SLO):
     can take a few seconds while Swift validates each segment) is
     acceptable for our manifest sizes (max ~10 segments).
 
-Progress reporting (Feature 3.5):
+Progress reporting:
   upload_dump() accepts an optional progress_callback(label: str) used by
   the async runner to surface fine-grained progress (e.g. "Uploading dump
   (segment 2 of 5)") on the job record. It is invoked only on the SLO
@@ -381,7 +381,7 @@ def _upload_dump_simple(
     file_size: int,
     log_event: Optional[Callable[[str, dict], None]],
 ) -> dict:
-    """Single-PUT upload: existing pre-Feature-2 behaviour, refactored."""
+    """Single-PUT upload: used for dumps below the SLO threshold."""
     container = cfg.swift_container
 
     _emit(log_event, "swift_upload_started", {

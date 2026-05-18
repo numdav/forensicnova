@@ -13,7 +13,7 @@
 #     unstack             -> stop_forensicnova        (stop unit, drop service catalog)
 #     clean               -> cleanup_forensicnova     (remove unit + data)
 #
-#   Dashboard (service "forensicnova-dashboard", Feature 4):
+#   Dashboard (service "forensicnova-dashboard"):
 #     stack install       -> install_forensicnova_dashboard      (pip install -e
 #                                                                 into Horizon venv)
 #     stack post-config   -> configure_forensicnova_dashboard    (copy enabled/,
@@ -52,7 +52,7 @@ fdash_log() {
 }
 
 # =============================================================================
-# Repo synchronisation (Feature 3.5+)
+# Repo synchronisation
 # =============================================================================
 
 # Sync /opt/stack/forensicnova to the latest origin/main commit.
@@ -82,7 +82,7 @@ fdash_log() {
 #     function logs a WARNING and continues with the on-disk code instead
 #     of aborting the stack. Better stale-but-running than no-stack-at-all.
 #
-# Monorepo note (Feature 4):
+# Monorepo note:
 #   This function syncs the WHOLE repo. Since the Horizon dashboard now
 #   lives in the same repo (under forensicnova_dashboard/), a single
 #   git reset --hard re-aligns both backend AND dashboard code in one
@@ -155,10 +155,8 @@ forensicnova_ensure_secret_key() {
 # Also grants dfir-tester the 'admin' role on EVERY existing project
 # so the forensic analyst can read metadata of any tenant's VMs.
 #
-# This admin-on-all-projects grant is the pragmatic prototype workaround.
-# A least-privilege Nova policy.yaml override (the deferred Feature 3)
-# is incompatible with Nova 2026.2's enforce_new_defaults=True and is
-# documented as a thesis-roadmap item.
+# This admin-on-all-projects grant is a pragmatic prototype workaround;
+# production deployments may want to tighten the grant.
 forensicnova_ensure_identity() {
     forensicnova_log "extra" "ensuring Keystone identity artifacts"
 
@@ -194,7 +192,7 @@ forensicnova_ensure_identity() {
 }
 
 # Ensure both the main forensic container AND the segments container that
-# SLO uploads (Feature 2) need. The segments container hosts dump segments
+# SLO uploads need. The segments container hosts dump segments
 # named '<dump_object_name>/seg-NNNN'; Swift treats it as an ordinary
 # container, but by convention we keep it separate from the main one to
 # clearly distinguish forensic artefacts (manifests, JSON reports, simple
@@ -218,13 +216,13 @@ forensicnova_ensure_container() {
     )
 }
 
-# Feature 3.5 — register ForensicNova as a first-class OpenStack service
+# Register ForensicNova as a first-class OpenStack service
 # in the Keystone catalog.
 #
 # Creates one service entry of type ${FORENSICNOVA_SERVICE_TYPE} and three
 # endpoints (public / internal / admin), all pointing at the Flask service
 # on http://${HOST_IP}:${FORENSICNOVA_PORT}. This is what lets the Horizon
-# dashboard (Feature 4) discover the API through the catalog rather than
+# dashboard discovers the API through the catalog rather than
 # hard-coding host:port.
 #
 # Idempotency:
@@ -288,7 +286,7 @@ forensicnova_register_dfir_service() {
     forensicnova_log "extra" "service catalog registration complete"
 }
 
-# Feature 3.5 — remove the ForensicNova service + endpoints from the
+# Remove the ForensicNova service + endpoints from the
 # Keystone catalog. Best-effort: during ./unstack.sh Keystone may already
 # be shutting down, so every failure is logged as a warning and ignored.
 forensicnova_unregister_dfir_service() {
@@ -538,7 +536,7 @@ cleanup_forensicnova() {
 }
 
 # =============================================================================
-# Dashboard (Feature 4) — Idempotent building blocks
+# Dashboard — Idempotent building blocks
 # =============================================================================
 #
 # The dashboard is a Horizon (Django) plugin. It is installed into Horizon's
@@ -709,7 +707,7 @@ if is_service_enabled forensicnova; then
     fi
 fi
 
-# --- Dashboard dispatcher (Feature 4) ---
+# --- Dashboard dispatcher ---
 if is_service_enabled forensicnova-dashboard; then
     if [[ "$1" == "stack" ]]; then
         case "$2" in

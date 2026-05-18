@@ -20,7 +20,7 @@ Endpoints:
   GET  /acquisitions/<acquisition_id>/report     — download .json report
   GET  /acquisitions/<acquisition_id>/report.pdf — download rendered PDF (on demand)
 
-Async acquisition model (Feature 3.5):
+Async acquisition model:
   POST /servers/<id>/memory_acquire no longer blocks for the full
   pipeline. It creates a job record, spawns a daemon worker thread
   (app.jobs.runner.start_acquisition_job), and returns HTTP 202 with a

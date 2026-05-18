@@ -96,7 +96,7 @@ class AcquisitionsTable(tables.DataTable):
         "started_at",
         verbose_name=_("Started"),
     )
-    # Backend F3.5 acquisition summary (see _build_summary in app/api/v1.py)
+    # The backend acquisition summary (see _build_summary in app/api/v1.py)
     # exposes the VM name under the key 'vm_name', not 'instance_name'.
     vm_name = tables.Column(
         "vm_name",
