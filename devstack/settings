@@ -68,3 +68,48 @@ HORIZON_LOCAL_ENABLED_DIR=${HORIZON_LOCAL_ENABLED_DIR:-$DEST/horizon/openstack_d
 # off independently from the backend via `disable_service` in local.conf.
 enable_service forensicnova
 enable_service forensicnova-dashboard
+
+# =============================================================================
+# Analyzer service (forensicnova-analyzer) — Volatility 3 + future MISP/YARA
+# =============================================================================
+#
+# Second Flask backend of the project, separate from the acquisition
+# backend. Same git repo (monorepo), same enable_plugin entry, but:
+#   - dedicated venv (.venv-analyzer)
+#   - dedicated systemd unit (devstack@forensicnova-analyzer.service)
+#   - dedicated TCP port (5235)
+#   - dedicated Keystone service (dfir-analyzer)
+#
+# Architectural rationale: crash isolation of Volatility scans +
+# independent lifecycle (analyzer restart does not interrupt in-flight
+# acquisitions).
+
+# --- Analyzer plugin layout ---
+FORENSICNOVA_ANALYZER_DIR=${FORENSICNOVA_ANALYZER_DIR:-$FORENSICNOVA_DIR}
+FORENSICNOVA_ANALYZER_PORT=${FORENSICNOVA_ANALYZER_PORT:-5235}
+FORENSICNOVA_ANALYZER_BIND_HOST=${FORENSICNOVA_ANALYZER_BIND_HOST:-0.0.0.0}
+
+# --- Analyzer Keystone service catalog ---
+# Separate type 'dfir-analyzer' to distinguish from the acquisition
+# backend 'dfir'. Lets the dashboard plugin (future) perform catalog
+# discovery specifically for the analyzer.
+FORENSICNOVA_ANALYZER_SERVICE_NAME=${FORENSICNOVA_ANALYZER_SERVICE_NAME:-dfir-analyzer}
+FORENSICNOVA_ANALYZER_SERVICE_TYPE=${FORENSICNOVA_ANALYZER_SERVICE_TYPE:-dfir-analyzer}
+FORENSICNOVA_ANALYZER_SERVICE_DESCRIPTION=${FORENSICNOVA_ANALYZER_SERVICE_DESCRIPTION:-ForensicNova DFIR memory analyzer API (Volatility 3)}
+
+# --- Runtime filesystem layout (host) ---
+FORENSICNOVA_ANALYZER_WORK_DIR=${FORENSICNOVA_ANALYZER_WORK_DIR:-/var/lib/forensicnova-analyzer}
+FORENSICNOVA_ANALYZER_JOBS_DIR=${FORENSICNOVA_ANALYZER_JOBS_DIR:-$FORENSICNOVA_ANALYZER_WORK_DIR/jobs}
+FORENSICNOVA_ANALYZER_CONF_FILE=${FORENSICNOVA_ANALYZER_CONF_FILE:-$FORENSICNOVA_CONF_DIR/forensicnova-analyzer.conf}
+FORENSICNOVA_ANALYZER_LOG_FILE=${FORENSICNOVA_ANALYZER_LOG_FILE:-$FORENSICNOVA_LOG_DIR/analyzer.log}
+
+# Volatility 3 symbol cache directory (XDG_CACHE_HOME for the service).
+# Dedicated path under WORK_DIR so it is wiped by `clean` and isolated
+# from the user cache. PDB files from the Microsoft Symbol Server are
+# downloaded and converted here on first run.
+FORENSICNOVA_ANALYZER_VOL3_CACHE=${FORENSICNOVA_ANALYZER_VOL3_CACHE:-$FORENSICNOVA_ANALYZER_WORK_DIR/vol3-cache}
+
+# --- DevStack service registration ---
+# Additional service flag for the analyzer backend. Disable from
+# local.conf with `disable_service forensicnova-analyzer`.
+enable_service forensicnova-analyzer
