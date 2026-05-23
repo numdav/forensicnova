@@ -787,6 +787,30 @@ log_file = ${FORENSICNOVA_ANALYZER_LOG_FILE}
 log_level = INFO
 work_dir = ${FORENSICNOVA_ANALYZER_WORK_DIR}
 jobs_dir = ${FORENSICNOVA_ANALYZER_JOBS_DIR}
+
+[keystone]
+auth_url = http://${HOST_IP}/identity
+region_name = ${REGION_NAME:-RegionOne}
+forensic_role = ${FORENSICNOVA_ROLE}
+
+[keystone_authtoken]
+www_authenticate_uri = http://${HOST_IP}/identity
+auth_url = http://${HOST_IP}/identity
+auth_type = password
+project_domain_id = default
+user_domain_id = default
+project_name = admin
+username = admin
+password = ${ADMIN_PASSWORD}
+delay_auth_decision = true
+interface = public
+
+[swift]
+container = ${FORENSICNOVA_SWIFT_CONTAINER}
+
+[forensics]
+project = ${FORENSICNOVA_PROJECT}
+dfir_user = ${FORENSICNOVA_DFIR_USER}
 EOF
     sudo chown "${STACK_USER}:${STACK_USER}" "${FORENSICNOVA_ANALYZER_CONF_FILE}"
     sudo chmod 0640 "${FORENSICNOVA_ANALYZER_CONF_FILE}"
@@ -818,6 +842,7 @@ WorkingDirectory=${FORENSICNOVA_ANALYZER_DIR}
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=${FORENSICNOVA_ANALYZER_DIR}
 Environment=FORENSICNOVA_ANALYZER_CONFIG=${FORENSICNOVA_ANALYZER_CONF_FILE}
+Environment=FORENSICNOVA_DFIR_PASSWORD=${FORENSICNOVA_DFIR_PASSWORD}
 Environment=XDG_CACHE_HOME=${FORENSICNOVA_ANALYZER_VOL3_CACHE}
 ExecStart=${venv_python} -m forensicnova_analyzer.wsgi
 Restart=on-failure
@@ -926,6 +951,15 @@ install_forensicnova_analyzer() {
 
 configure_forensicnova_analyzer() {
     fanalyzer_log "post-config" "phase: post-config"
+    # Defense in depth: the same check exists in configure_forensicnova,
+    # which normally runs first in the stack lifecycle. We re-check here
+    # so the analyzer fails clearly even if the acquisition backend is
+    # disabled in local.conf.
+    if [[ -z "$FORENSICNOVA_DFIR_PASSWORD" ]]; then
+        fanalyzer_log "post-config" \
+            "ERROR: FORENSICNOVA_DFIR_PASSWORD is unset. Set it in local.conf."
+        return 1
+    fi
     fanalyzer_create_runtime_dirs
     fanalyzer_write_config_file
 }

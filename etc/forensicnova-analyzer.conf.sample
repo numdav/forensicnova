@@ -5,8 +5,8 @@
 #
 # The copy happens in the `post-config` phase (see
 # configure_forensicnova_analyzer in devstack/plugin.sh). Value overrides
-# are applied via FORENSICNOVA_ANALYZER_* variables in local.conf before
-# stack.sh.
+# are applied via FORENSICNOVA_ANALYZER_* and FORENSICNOVA_* variables in
+# local.conf before stack.sh.
 
 [forensicnova_analyzer]
 
@@ -31,3 +31,65 @@ work_dir = /var/lib/forensicnova-analyzer
 # Directory where the JobManager persists one JSON file per analysis.
 # Survives service restart for startup recovery.
 jobs_dir = /var/lib/forensicnova-analyzer/jobs
+
+
+# -----------------------------------------------------------------------------
+# Identity discovery — used by swift.py to authenticate as dfir-tester
+# and read/write Swift objects in the forensics project.
+# -----------------------------------------------------------------------------
+[keystone]
+
+# Keystone identity API endpoint. Populated by the DevStack plugin
+# from $HOST_IP. Example: http://192.168.127.130/identity
+auth_url = http://localhost/identity
+
+# OpenStack region. DevStack defaults to RegionOne.
+region_name = RegionOne
+
+# Role required by the analyzer API for authenticated endpoints.
+# Used by keystonemiddleware when authenticated routes are activated
+# in Stage E2+. Currently informational.
+forensic_role = forensic_analyst
+
+
+# -----------------------------------------------------------------------------
+# Service credentials consumed by keystonemiddleware to validate the
+# X-Auth-Token of incoming API requests. Same pattern as app/config.py.
+# Active only when authenticated endpoints are exposed (Stage E2+).
+# The password may be overridden by env var
+# FORENSICNOVA_KEYSTONE_AUTHTOKEN_PASSWORD so it never has to live on
+# disk in production deployments.
+# -----------------------------------------------------------------------------
+[keystone_authtoken]
+
+www_authenticate_uri = http://localhost/identity
+auth_url = http://localhost/identity
+auth_type = password
+project_domain_id = default
+user_domain_id = default
+project_name = admin
+username = admin
+password = REPLACE_ME
+delay_auth_decision = true
+interface = public
+
+
+# -----------------------------------------------------------------------------
+# Object storage — the forensics container holds both acquisition
+# artifacts (dump-*.raw, report-*.json, segments) and analysis result
+# JSON objects (analysis-*-*.json).
+# -----------------------------------------------------------------------------
+[swift]
+
+container = forensics
+
+
+# -----------------------------------------------------------------------------
+# DFIR project context — the OpenStack project under which the
+# forensics container lives and the user the analyzer authenticates as
+# when reading dumps / writing analyses on Swift.
+# -----------------------------------------------------------------------------
+[forensics]
+
+project = forensics
+dfir_user = dfir-tester
