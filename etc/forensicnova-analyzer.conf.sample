@@ -1,0 +1,33 @@
+# ForensicNova analyzer — sample configuration.
+#
+# This file is the template that the DevStack plugin copies to:
+#   /etc/forensicnova/forensicnova-analyzer.conf
+#
+# The copy happens in the `post-config` phase (see
+# configure_forensicnova_analyzer in devstack/plugin.sh). Value overrides
+# are applied via FORENSICNOVA_ANALYZER_* variables in local.conf before
+# stack.sh.
+
+[forensicnova_analyzer]
+
+# IP address the analyzer backend listens on.
+# 0.0.0.0 = all interfaces. For production, restrict to a specific IP.
+bind_host = 0.0.0.0
+
+# TCP port for the analyzer backend. Default 5235 to avoid colliding
+# with the acquisition backend (5234).
+bind_port = 5235
+
+# Analyzer-dedicated log file. Rotation 10 MB x 5 files.
+log_file = /var/log/forensicnova/analyzer.log
+
+# Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+log_level = INFO
+
+# Working directory for temporary files (dumps downloaded from Swift,
+# intermediate Volatility outputs). Cleaned up post-analysis.
+work_dir = /var/lib/forensicnova-analyzer
+
+# Directory where the JobManager persists one JSON file per analysis.
+# Survives service restart for startup recovery.
+jobs_dir = /var/lib/forensicnova-analyzer/jobs
