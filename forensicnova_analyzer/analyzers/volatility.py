@@ -83,24 +83,27 @@ _STDERR_TAIL_LINES = 50
 
 
 def get_volatility_version() -> str:
-    """Return the Vol3 version string by invoking `vol --version`.
+    """Return the Vol3 version string by reading it from the installed package.
 
-    Returns "unknown" if the call fails for any reason. This is
-    recorded in the analysis JSON (input metadata) so the analyst can
-    correlate a result with the exact Vol3 build that produced it.
+    Vol3 has no working `vol --version` flag (it prints usage instead),
+    so we read the version constants directly from the volatility3
+    package. The import is lazy so this module can still be loaded if
+    Vol3 is somehow misconfigured — we'd just report 'unknown' instead
+    of failing import.
+
+    The value is recorded in the analysis JSON as input metadata so
+    the analyst can correlate a result with the exact Vol3 build that
+    produced it.
     """
     try:
-        proc = subprocess.run(
-            [VOL_BIN, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+        from volatility3.framework import constants
+        return (
+            f"{constants.VERSION_MAJOR}."
+            f"{constants.VERSION_MINOR}."
+            f"{constants.VERSION_PATCH}"
         )
-        out = (proc.stdout or proc.stderr or "").strip()
-        return out.split("\n", 1)[0] if out else "unknown"
     except Exception as exc:  # noqa: BLE001
-        log.warning("could not query vol --version: %s", exc)
+        log.warning("could not read volatility3 version: %s", exc)
         return "unknown"
 
 
