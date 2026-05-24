@@ -69,6 +69,14 @@ log = logging.getLogger("forensicnova_analyzer.swift")
 # the naming convention enforced by app/jobs/runner.py.
 REPORT_OBJECT_PREFIX = "report-"
 
+# Acquisition report schema versions this analyzer can navigate. The
+# field layout (e.g. report["dump"]["md5"] vs report["md5"]) depends on
+# the version: summarize_acquisition() raises UnsupportedReportSchema
+# when it encounters a value not in this set. Extend by adding a string
+# (e.g. "1.3") once the navigation paths in summarize_acquisition() have
+# been updated to handle it.
+SUPPORTED_REPORT_SCHEMA_VERSIONS = frozenset({"1.2"})
+
 # Streaming chunk size for download_dump_with_hashes(). 1 MiB is the
 # sweet spot for HTTP streaming + hashing: large enough to amortise
 # per-syscall overhead, small enough to keep RAM constant.
@@ -94,6 +102,17 @@ class IntegrityError(RuntimeError):
 
     Carries the expected and computed hashes so the caller can decide
     whether to log them as evidence in a CoC event.
+    """
+
+
+class UnsupportedReportSchema(RuntimeError):
+    """Raised when an acquisition report's schema_version is not in
+    SUPPORTED_REPORT_SCHEMA_VERSIONS.
+
+    This is a fail-fast guard for chain of custody: if the analyzer
+    cannot reliably extract md5/sha1/instance from a report, it must
+    refuse to drive an analysis on top of it rather than silently
+    skipping the coherence check.
     """
 
 
@@ -288,6 +307,84 @@ def find_acquisition(
     return None
 
 
+def summarize_acquisition(report: dict) -> dict:
+    """Flatten an acquisition report into a stable summary dict.
+
+    This is the **single point of truth** for the analyzer's coupling
+    with the acquisition report JSON schema. Every other module reads
+    summary fields, never the nested report. When the acquisition
+    backend bumps the schema (v1.2 -> v1.3), only this function and
+    SUPPORTED_REPORT_SCHEMA_VERSIONS need updating.
+
+    Current schema reference (v1.2):
+        report["schema_version"]              -> "1.2"
+        report["acquisition_id"]              -> top-level UUID
+        report["instance"]["name"]            -> Nova instance name
+        report["instance"]["id"]              -> Nova instance UUID
+        report["dump"]["md5"]                 -> 32-hex MD5 of dump
+        report["dump"]["sha1"]                -> 40-hex SHA1 of dump
+        report["dump"]["size_bytes"]          -> integer file size
+        report["dump"]["swift_object"]        -> "container/object" full path
+        report["timestamps"]["completed_at"]  -> ISO8601 UTC
+
+    :returns: dict with the following keys (all string except where noted):
+        - schema_version
+        - acquisition_id
+        - instance_name
+        - instance_id
+        - dump_object_name   (str): just the object name, no container
+        - dump_swift_object  (str): "container/object" full path
+        - dump_md5
+        - dump_sha1
+        - dump_size_bytes    (int)
+        - completed_at
+
+    :raises UnsupportedReportSchema: if report["schema_version"] is not
+        in SUPPORTED_REPORT_SCHEMA_VERSIONS.
+    :raises KeyError: if a mandatory field is missing inside an
+        otherwise-supported schema version (report is malformed).
+    """
+    if not isinstance(report, dict):
+        raise UnsupportedReportSchema(
+            f"report is not a dict: got {type(report).__name__}"
+        )
+
+    schema_version = str(report.get("schema_version", "")).strip()
+    if schema_version not in SUPPORTED_REPORT_SCHEMA_VERSIONS:
+        raise UnsupportedReportSchema(
+            f"unsupported acquisition report schema_version={schema_version!r}; "
+            f"supported: {sorted(SUPPORTED_REPORT_SCHEMA_VERSIONS)}"
+        )
+
+    # v1.2 navigation. KeyError here means the report claims v1.2 but
+    # is structurally malformed — that is an upstream bug, not a
+    # version-skew problem, so we let KeyError propagate untouched.
+    instance = report["instance"]
+    dump = report["dump"]
+    timestamps = report.get("timestamps", {})
+
+    swift_obj_full = dump["swift_object"]  # e.g. "forensics/dump-vm01-...raw"
+    # Split off the container prefix to obtain the bare object name
+    # (the form expected by swiftclient.client.get_object).
+    if "/" in swift_obj_full:
+        dump_object_name = swift_obj_full.split("/", 1)[1]
+    else:
+        dump_object_name = swift_obj_full
+
+    return {
+        "schema_version":   schema_version,
+        "acquisition_id":   report["acquisition_id"],
+        "instance_name":    instance["name"],
+        "instance_id":      instance["id"],
+        "dump_object_name": dump_object_name,
+        "dump_swift_object": swift_obj_full,
+        "dump_md5":         dump["md5"],
+        "dump_sha1":        dump["sha1"],
+        "dump_size_bytes":  int(dump["size_bytes"]),
+        "completed_at":     timestamps.get("completed_at", ""),
+    }
+
+
 def upload_analysis_json(
     json_bytes: bytes,
     object_name: str,
@@ -351,41 +448,57 @@ def upload_analysis_json(
     }
 
 
-def verify_dump_hashes(computed: dict, expected: dict) -> None:
-    """Compare hashes from download against the acquisition report.
+def verify_dump_hashes(
+    computed_md5: str,
+    computed_sha1: str,
+    expected_md5: str,
+    expected_sha1: str,
+) -> None:
+    """Compare hashes computed from a downloaded dump against the
+    expected ones declared in the acquisition report.
 
-    `computed` is the dict returned by download_dump_with_hashes().
-    `expected` is the acquisition report dict (must contain 'md5' and
-    'sha1' string fields at the top level — schema v1.1 guarantees this).
+    Both pairs are passed as plain hex strings so this function is
+    independent of the report's JSON schema. The caller is expected to
+    have already navigated the report (e.g. via summarize_acquisition)
+    and produced the four hex strings.
 
-    Raises IntegrityError on mismatch; returns None on success. The
-    caller is responsible for emitting any CoC event before/after.
+    All values are lower-cased before comparison so a mixed-case input
+    (e.g. uppercase hex from a third-party tool) does not produce a
+    false mismatch.
+
+    :raises IntegrityError: if either hash mismatches, or if any of the
+        four arguments is empty (means the caller lost information
+        upstream and should not pretend the check succeeded).
+
+    The caller is responsible for emitting any CoC event before/after
+    this call.
     """
-    expected_md5 = (expected or {}).get("md5", "").lower()
-    expected_sha1 = (expected or {}).get("sha1", "").lower()
-    computed_md5 = (computed or {}).get("md5", "").lower()
-    computed_sha1 = (computed or {}).get("sha1", "").lower()
+    cm = (computed_md5 or "").lower()
+    cs = (computed_sha1 or "").lower()
+    em = (expected_md5 or "").lower()
+    es = (expected_sha1 or "").lower()
 
-    if not expected_md5 or not expected_sha1:
+    if not (cm and cs and em and es):
         raise IntegrityError(
-            "acquisition report does not carry both md5 and sha1 — "
-            "cannot perform coherence check"
+            "incomplete hash inputs for coherence check — "
+            f"computed_md5='{cm}' computed_sha1='{cs}' "
+            f"expected_md5='{em}' expected_sha1='{es}'"
         )
 
-    md5_ok = computed_md5 == expected_md5
-    sha1_ok = computed_sha1 == expected_sha1
+    md5_ok = cm == em
+    sha1_ok = cs == es
 
     if md5_ok and sha1_ok:
         log.info(
             "hash coherence check passed (md5=%s, sha1=%s)",
-            computed_md5, computed_sha1,
+            cm, cs,
         )
         return
 
     raise IntegrityError(
         "hash mismatch after download — "
-        f"md5 expected={expected_md5} got={computed_md5} (match={md5_ok}); "
-        f"sha1 expected={expected_sha1} got={computed_sha1} (match={sha1_ok})"
+        f"md5 expected={em} got={cm} (match={md5_ok}); "
+        f"sha1 expected={es} got={cs} (match={sha1_ok})"
     )
 
 
