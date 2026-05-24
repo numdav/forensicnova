@@ -58,10 +58,18 @@ from forensicnova_analyzer.jobs_runner import (
 
 log = logging.getLogger("forensicnova_analyzer.api.v1")
 
-# Whitelist of analyzers callable from the API. Adding "volatility"
-# here in E3 is the only API-side change needed when the Vol3 wrapper
-# class lands.
-_KNOWN_ANALYZERS = {"noop"}
+# Whitelist of analyzers callable from the API. Adding a new analyzer
+# requires both registering it here and wiring its class in the
+# runner's _dispatch_analyzer (jobs_runner.py).
+_KNOWN_ANALYZERS = {"noop", "volatility"}
+
+# Preset whitelist per analyzer. None means "no preset validation"
+# (e.g. noop ignores preset entirely). For volatility, only "fast" is
+# accepted in E3; E4 will extend with "full" and "custom".
+_SUPPORTED_PRESETS = {
+    "noop":       None,
+    "volatility": {"fast"},
+}
 
 # Role required to call any /api/v1/* endpoint. Same name as in the
 # acquisition backend; granted by the DevStack plugin to dfir-tester.
@@ -236,6 +244,19 @@ def trigger_analysis_endpoint(acquisition_id: str):
 
     preset = body.get("preset")
     plugins = body.get("plugins")
+
+    # Validate preset against the per-analyzer whitelist (E3: vol only
+    # supports "fast"; E4 will widen). None preset is always accepted
+    # — the runner picks a sensible default (e.g. "fast" for vol).
+    supported = _SUPPORTED_PRESETS.get(analyzer_name)
+    if preset is not None and supported is not None and preset not in supported:
+        return jsonify({
+            "error":   "unsupported_preset",
+            "message": (
+                f"analyzer={analyzer_name!r} does not support preset={preset!r}; "
+                f"supported: {sorted(supported)}"
+            ),
+        }), 400
 
     # Operator identity comes from the Keystone-validated token, not
     # from the request body. before_request already ensured the token

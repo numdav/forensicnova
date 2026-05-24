@@ -71,7 +71,7 @@ from pathlib import Path
 from typing import Optional
 
 from forensicnova_analyzer import swift
-from forensicnova_analyzer.analyzers import NoOpAnalyzer
+from forensicnova_analyzer.analyzers import NoOpAnalyzer, VolatilityAnalyzer
 from forensicnova_analyzer.jobs import (
     JobManager,
     PHASE_DOWNLOADING_DUMP,
@@ -260,6 +260,7 @@ def _run_analysis(
             summary=summary,
             preset=preset,
             plugins=plugins,
+            cfg=cfg,
         )
 
         # Strict coherence policy: if the analyzer says hashes do not
@@ -539,16 +540,33 @@ def _dispatch_analyzer(
     summary: dict,
     preset: Optional[str],
     plugins: Optional[list[str]],
+    cfg,
 ) -> dict:
     """Dispatch to the requested analyzer class and return its result dict.
 
-    Stage E2.4 supports only "noop". E3+ will register VolatilityAnalyzer.
+    Stage E2.4 supported only "noop". Stage E3 adds "volatility" with
+    the "fast" preset (5 Windows plugins). E4 will extend Vol3 with
+    "full" + "custom" presets.
+
+    `cfg` is needed by VolatilityAnalyzer to locate the XDG_CACHE_HOME
+    directory (<cfg.work_dir>/vol3-cache) where Vol3 caches PDB
+    symbol files between runs.
     """
     if analyzer_name == "noop":
         return NoOpAnalyzer().run(
             dump_path=dump_path,
             expected_md5=summary["dump_md5"],
             expected_sha1=summary["dump_sha1"],
+        )
+    if analyzer_name == "volatility":
+        vol_cache = Path(cfg.work_dir) / "vol3-cache"
+        return VolatilityAnalyzer(vol_cache_dir=vol_cache).run(
+            dump_path=dump_path,
+            expected_md5=summary["dump_md5"],
+            expected_sha1=summary["dump_sha1"],
+            summary=summary,
+            preset=preset or "fast",
+            plugins=plugins,
         )
     raise ValueError(f"unknown analyzer: {analyzer_name!r}")
 

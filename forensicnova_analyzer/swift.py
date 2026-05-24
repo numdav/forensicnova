@@ -363,6 +363,16 @@ def summarize_acquisition(report: dict) -> dict:
     dump = report["dump"]
     timestamps = report.get("timestamps", {})
 
+    # target_system block (added in v1.2): Nova/Glance/libvirt metadata
+    # collected at acquisition time. Glance os_type / os_distro feed
+    # the analyzer's OS hint resolver — both may be None when the
+    # original Glance image carries no os_* properties (lesson from
+    # the F1/F2 era: many private images lack these annotations).
+    target_system = report.get("target_system") or {}
+    glance = target_system.get("glance") or {}
+    glance_os_type = glance.get("os_type")
+    glance_os_distro = glance.get("os_distro")
+
     swift_obj_full = dump["swift_object"]  # e.g. "forensics/dump-vm01-...raw"
     # Split off the container prefix to obtain the bare object name
     # (the form expected by swiftclient.client.get_object).
@@ -382,6 +392,11 @@ def summarize_acquisition(report: dict) -> dict:
         "dump_sha1":        dump["sha1"],
         "dump_size_bytes":  int(dump["size_bytes"]),
         "completed_at":     timestamps.get("completed_at", ""),
+        # Glance hints (may be None) — used by analyzers/volatility
+        # ._resolve_os to pick the right plugin namespace. Passed
+        # through raw; the analyzer owns the normalisation policy.
+        "glance_os_type":   glance_os_type,
+        "glance_os_distro": glance_os_distro,
     }
 
 

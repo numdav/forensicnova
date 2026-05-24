@@ -55,6 +55,7 @@ Output schema:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -287,3 +288,324 @@ def _tail(text: str, max_lines: int) -> str:
         return ""
     lines = text.splitlines()
     return "\n".join(lines[-max_lines:])
+
+
+# ===========================================================================
+# VolatilityAnalyzer — high-level orchestration of preset plugin pipelines
+# ===========================================================================
+
+# Streaming read chunk for the triple-witness hash phase. Same value
+# as analyzers/noop.py and swift.download_dump_with_hashes so the I/O
+# profile is consistent across the whole pipeline.
+_HASH_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+
+# Preset -> plugin list maps. Per-OS variants because Vol3 plugin FQNs
+# are OS-specific (windows.pslist.PsList vs linux.pslist.PsList). The
+# "fast" preset answers the four triage questions an analyst asks in
+# the first minute of incident response:
+#
+#     - Who is running?       (pslist)
+#     - Who spawned whom?     (pstree)   — exposes injection parents
+#     - What did they launch? (cmdline)  — exposes credential dumpers
+#     - Who's calling out?    (netscan)  — exposes C2 callbacks
+#     - What system is this?  (info)     — kernel build, banner, DTB
+#
+# E4 will introduce PRESET_FULL_* covering injection detection
+# (malware.malfind), driver/rootkit (modules, modscan), and credential
+# artifacts (registry.hashdump).
+
+PRESET_FAST_WINDOWS = [
+    "windows.info.Info",
+    "windows.pslist.PsList",
+    "windows.pstree.PsTree",
+    "windows.cmdline.CmdLine",
+    "windows.netscan.NetScan",
+]
+
+PRESET_FAST_LINUX = [
+    # Placeholder — Linux is out of scope for the thesis demo, but
+    # having a non-empty map prevents accidental fallback to windows
+    # plugins when a future Linux acquisition lands here.
+    "linux.pslist.PsList",
+    "linux.psaux.PsAux",
+    "linux.lsmod.Lsmod",
+    "linux.bash.Bash",
+]
+
+
+def _preset_plugin_list(preset: str, os_hint: str) -> list[str]:
+    """Resolve a (preset, os_hint) pair into the Vol3 plugin FQN list.
+
+    :raises ValueError: if the combination is not supported in this
+        revision (E3 supports only fast/windows and fast/linux).
+    """
+    if preset == "fast":
+        if os_hint == "linux":
+            return list(PRESET_FAST_LINUX)
+        return list(PRESET_FAST_WINDOWS)
+    raise ValueError(
+        f"preset {preset!r} not supported yet (E3 supports only 'fast'); "
+        f"E4 will add 'full' and 'custom'"
+    )
+
+
+def _resolve_os(summary: dict) -> str:
+    """Normalise the OS hint from acquisition summary fields.
+
+    Reads glance_os_type / glance_os_distro from the acquisition
+    summary (single point of truth — see swift.summarize_acquisition).
+    Returns one of {"windows", "linux"}; defaults to "windows" when
+    the metadata is missing or ambiguous (consistent with our demo
+    target Windows Server 2022).
+
+    Note: Vol3 has its own automagic that detects the dump's actual
+    OS by scanning kernel structures. So a wrong hint here causes at
+    worst a useless plugin run that fails fast — it does not corrupt
+    results.
+    """
+    raw_type = (summary.get("glance_os_type") or "").lower().strip()
+    raw_distro = (summary.get("glance_os_distro") or "").lower().strip()
+
+    if raw_type == "linux":
+        return "linux"
+    if raw_distro.startswith(("ubuntu", "debian", "centos", "rhel",
+                              "fedora", "rocky", "alma", "suse",
+                              "arch", "alpine")):
+        return "linux"
+    if raw_type == "windows":
+        return "windows"
+    if raw_distro.startswith("win"):
+        return "windows"
+
+    log.info(
+        "OS hint not determinable (os_type=%r os_distro=%r), defaulting to windows",
+        raw_type, raw_distro,
+    )
+    return "windows"
+
+
+class VolatilityAnalyzer:
+    """Run a preset (fast/full/custom) of Volatility 3 plugins on a dump.
+
+    Stateful only across one `run()` call; reusable across jobs but
+    the runner creates one instance per job.
+
+    Pipeline inside run():
+      1. Triple-witness hashing (streaming read, MD5+SHA1). If the
+         result does not match the report, hashes_match_report becomes
+         False — the runner translates that into fail_job. Vol3 plugins
+         are NOT invoked if hashing fails the comparison (fail-fast).
+      2. OS resolution (from acquisition metadata).
+      3. Preset plugin list selection.
+      4. Serial run_plugin() loop. Per-plugin failures (timeout,
+         non-zero returncode, JSON parse errors) are recorded in the
+         result dict with a status field but do NOT abort the loop.
+      5. Aggregate counts (ok / failed / timeout / parse_error).
+
+    Output schema (returned by run()):
+      analyzer              "volatility"
+      analyzer_version      "0.1.0"
+      vol3_version          (from package constants, e.g. "2.28.0")
+      preset                "fast" | "full" | "custom"
+      os_hint               "windows" | "linux"
+      dump_path             absolute path read
+      dump_size_bytes       bytes streamed
+      dump_md5              hex MD5 computed during step 1
+      dump_sha1             hex SHA1 computed during step 1
+      hashes_match_report   bool
+      mismatch              dict or None
+      duration_seconds      total wall-clock (steps 1-5)
+      hash_phase_seconds    just step 1 (useful to measure overhead)
+      plugin_phase_seconds  just step 4 (useful to compare presets)
+      throughput_mib_per_s  derived from step 1
+      plugins               dict[plugin_fqn -> run_plugin result dict]
+      summary_counts        dict with ok/failed/timeout/parse_error counts
+
+    Failure policy:
+      Same as NoOpAnalyzer — does NOT raise on hash mismatch. The
+      runner inspects hashes_match_report and decides. Plugin-level
+      failures are degradation, not failure: they appear in the
+      result with status != "ok" and the job is still considered
+      completed (so the operator can see which plugins succeeded).
+    """
+
+    name = "volatility"
+    version = "0.1.0"
+
+    SUPPORTED_PRESETS = frozenset({"fast"})  # E4: + "full", "custom"
+
+    def __init__(self, vol_cache_dir: Path) -> None:
+        """:param vol_cache_dir: XDG_CACHE_HOME for Vol3 subprocesses
+        (PDB symbol cache). The runner passes
+        <cfg.work_dir>/vol3-cache so the directory is isolated from
+        the operator's ~/.cache and reusable across jobs.
+        """
+        self.vol_cache_dir = Path(vol_cache_dir)
+
+    def run(
+        self,
+        dump_path: Path,
+        expected_md5: str,
+        expected_sha1: str,
+        summary: dict,
+        preset: str = "fast",
+        plugins: Optional[list[str]] = None,
+        per_plugin_timeout: int = DEFAULT_PLUGIN_TIMEOUT,
+    ) -> dict:
+        """Execute the requested preset and return an aggregated result.
+
+        :param dump_path:          local path to the dump file
+        :param expected_md5:       MD5 from acquisition report (triple-witness)
+        :param expected_sha1:      SHA1 from acquisition report (triple-witness)
+        :param summary:            full summary from swift.summarize_acquisition,
+                                   used for OS resolution
+        :param preset:             "fast" (E3), "full"/"custom" (E4)
+        :param plugins:            explicit plugin FQN list — only honoured
+                                   when preset=="custom" (E4); ignored otherwise
+        :param per_plugin_timeout: passed to each run_plugin() call
+
+        :returns: dict per the schema in the class docstring.
+        :raises ValueError: if preset is not in SUPPORTED_PRESETS.
+        :raises FileNotFoundError: if dump_path does not exist.
+        """
+        if preset not in self.SUPPORTED_PRESETS:
+            raise ValueError(
+                f"preset {preset!r} not supported in this revision; "
+                f"supported: {sorted(self.SUPPORTED_PRESETS)}"
+            )
+
+        dump_path = Path(dump_path)
+        if not dump_path.is_file():
+            raise FileNotFoundError(f"dump file not found: {dump_path}")
+
+        log.info(
+            "[volatility] starting: preset=%s dump=%s",
+            preset, dump_path,
+        )
+
+        t_total_start = time.monotonic()
+
+        # ----- STEP 1: triple-witness hashing -----
+        t_hash_start = time.monotonic()
+        md5_h = hashlib.md5()
+        sha1_h = hashlib.sha1()
+        size_bytes = 0
+        with dump_path.open("rb") as fh:
+            while True:
+                chunk = fh.read(_HASH_CHUNK_SIZE)
+                if not chunk:
+                    break
+                md5_h.update(chunk)
+                sha1_h.update(chunk)
+                size_bytes += len(chunk)
+        hash_phase_seconds = time.monotonic() - t_hash_start
+
+        computed_md5 = md5_h.hexdigest()
+        computed_sha1 = sha1_h.hexdigest()
+        em = (expected_md5 or "").lower()
+        es = (expected_sha1 or "").lower()
+        md5_ok = computed_md5 == em
+        sha1_ok = computed_sha1 == es
+        hashes_match = bool(em and es and md5_ok and sha1_ok)
+
+        throughput_mib_s = (
+            (size_bytes / (1024 * 1024)) / hash_phase_seconds
+            if hash_phase_seconds > 0 else 0.0
+        )
+
+        log.info(
+            "[volatility] hash phase done: %.2fs, %.1f MiB/s, match=%s",
+            hash_phase_seconds, throughput_mib_s, hashes_match,
+        )
+
+        # If hashes don't match, return early WITHOUT running plugins.
+        # The runner will see hashes_match_report=False and fail the
+        # job. Running plugins on a tampered dump would waste compute
+        # and produce misleading results.
+        if not hashes_match:
+            return {
+                "analyzer":             self.name,
+                "analyzer_version":     self.version,
+                "vol3_version":         get_volatility_version(),
+                "preset":               preset,
+                "os_hint":              None,  # not resolved when hashes fail
+                "dump_path":            str(dump_path),
+                "dump_size_bytes":      size_bytes,
+                "dump_md5":             computed_md5,
+                "dump_sha1":             computed_sha1,
+                "hashes_match_report":  False,
+                "mismatch": {
+                    "expected_md5":  em,
+                    "computed_md5":  computed_md5,
+                    "md5_match":     md5_ok,
+                    "expected_sha1": es,
+                    "computed_sha1": computed_sha1,
+                    "sha1_match":    sha1_ok,
+                },
+                "duration_seconds":     round(time.monotonic() - t_total_start, 3),
+                "hash_phase_seconds":   round(hash_phase_seconds, 3),
+                "plugin_phase_seconds": 0.0,
+                "throughput_mib_per_s": round(throughput_mib_s, 2),
+                "plugins":              {},
+                "summary_counts":       {"ok": 0, "failed": 0, "timeout": 0,
+                                         "parse_error": 0, "skipped_hash_fail": 0},
+            }
+
+        # ----- STEP 2: OS resolution -----
+        os_hint = _resolve_os(summary)
+        log.info("[volatility] OS hint resolved: %s", os_hint)
+
+        # ----- STEP 3: preset plugin list -----
+        plugin_list = _preset_plugin_list(preset, os_hint)
+        log.info(
+            "[volatility] preset=%s os=%s -> %d plugins: %s",
+            preset, os_hint, len(plugin_list), plugin_list,
+        )
+
+        # ----- STEP 4: serial plugin execution -----
+        t_plug_start = time.monotonic()
+        plugin_results: dict[str, dict] = {}
+        counts = {"ok": 0, "failed": 0, "timeout": 0, "parse_error": 0}
+
+        for plugin_name in plugin_list:
+            log.info("[volatility] running plugin: %s", plugin_name)
+            result = run_plugin(
+                dump_path=dump_path,
+                plugin_name=plugin_name,
+                cache_dir=self.vol_cache_dir,
+                timeout=per_plugin_timeout,
+            )
+            plugin_results[plugin_name] = result
+            status = result.get("status", "failed")
+            counts[status] = counts.get(status, 0) + 1
+
+        plugin_phase_seconds = time.monotonic() - t_plug_start
+
+        # ----- STEP 5: aggregate and return -----
+        total_duration = time.monotonic() - t_total_start
+
+        log.info(
+            "[volatility] DONE preset=%s total=%.1fs (hash=%.1fs plugins=%.1fs) counts=%s",
+            preset, total_duration, hash_phase_seconds, plugin_phase_seconds,
+            counts,
+        )
+
+        return {
+            "analyzer":             self.name,
+            "analyzer_version":     self.version,
+            "vol3_version":         get_volatility_version(),
+            "preset":               preset,
+            "os_hint":              os_hint,
+            "dump_path":            str(dump_path),
+            "dump_size_bytes":      size_bytes,
+            "dump_md5":             computed_md5,
+            "dump_sha1":             computed_sha1,
+            "hashes_match_report":  True,
+            "mismatch":             None,
+            "duration_seconds":     round(total_duration, 3),
+            "hash_phase_seconds":   round(hash_phase_seconds, 3),
+            "plugin_phase_seconds": round(plugin_phase_seconds, 3),
+            "throughput_mib_per_s": round(throughput_mib_s, 2),
+            "plugins":              plugin_results,
+            "summary_counts":       counts,
+        }
