@@ -332,20 +332,282 @@ PRESET_FAST_LINUX = [
     "linux.bash.Bash",
 ]
 
+# "full" preset — 13 plugins covering all six SANS macro-areas of
+# Windows memory forensics:
+#
+#   1. Identify Rogue Processes   pslist, psscan, pstree
+#   2. Analyze Process Objects    cmdline, handles, dlllist
+#   3. Review Network Artifacts   netscan
+#   4. Look for Code Injection    malware.malfind, malware.ldrmodules,
+#                                 malware.hollowprocesses
+#   5. Audit Drivers/Rootkit      modules, ssdt
+#   6. Metadata                   info
+#
+# psscan complements pslist by scanning memory for orphaned EPROCESS
+# blocks (DKOM-hidden processes). malfind detects RWX regions not
+# backed by a file on disk — the canonical signature for Meterpreter
+# shellcode injection. hollowprocesses detects process hollowing
+# (REMCOS, HijackLoader, generic T1055.012). SSDT detects kernel-level
+# hooks placed by rootkits to intercept system calls.
 
-def _preset_plugin_list(preset: str, os_hint: str) -> list[str]:
+PRESET_FULL_WINDOWS = [
+    "windows.info.Info",
+    "windows.pslist.PsList",
+    "windows.psscan.PsScan",
+    "windows.pstree.PsTree",
+    "windows.cmdline.CmdLine",
+    "windows.handles.Handles",
+    "windows.dlllist.DllList",
+    "windows.netscan.NetScan",
+    "windows.malware.malfind.Malfind",
+    "windows.malware.ldrmodules.LdrModules",
+    "windows.malware.hollowprocesses.HollowProcesses",
+    "windows.modules.Modules",
+    "windows.ssdt.SSDT",
+]
+
+PRESET_FULL_LINUX = [
+    # Placeholder, see PRESET_FAST_LINUX comment.
+    "linux.pslist.PsList",
+    "linux.psaux.PsAux",
+    "linux.lsmod.Lsmod",
+    "linux.bash.Bash",
+    "linux.malfind.Malfind",
+    "linux.check_modules.Check_modules",
+    "linux.check_syscall.Check_syscall",
+    "linux.check_idt.Check_idt",
+]
+
+# Custom preset whitelist — plugins that can be requested via
+# preset="custom". The whitelist excludes plugins that produce
+# non-JSON-friendly output (binary file dumps, megabytes of raw
+# strings) which would inflate the analysis JSON beyond practical
+# size limits. Adding a plugin here is a deliberate trust decision:
+# the runner will accept it from API callers.
+#
+# Excluded from the namespace seen on the deployed Vol3 2.28.0:
+#   windows.dumpfiles.DumpFiles  — writes PE/file artifacts to disk
+#   windows.pedump.PEDump        — writes PE files to disk
+#   windows.strings.Strings      — emits a string per byte run (huge)
+#
+# All other 88 plugins are accepted. The list below is the result of
+# `vol --help | grep ^\s+windows\.` filtered against the exclusion
+# set, snapshot taken on 2026-05-24 against Vol3 2.28.0.
+
+PLUGIN_WHITELIST_WINDOWS = frozenset({
+    "windows.amcache.Amcache",
+    "windows.bigpools.BigPools",
+    "windows.callbacks.Callbacks",
+    "windows.cmdline.CmdLine",
+    "windows.cmdscan.CmdScan",
+    "windows.consoles.Consoles",
+    "windows.crashinfo.Crashinfo",
+    "windows.debugregisters.DebugRegisters",
+    "windows.deskscan.DeskScan",
+    "windows.desktops.Desktops",
+    "windows.devicetree.DeviceTree",
+    "windows.dlllist.DllList",
+    "windows.driverirp.DriverIrp",
+    "windows.drivermodule.DriverModule",
+    "windows.driverscan.DriverScan",
+    "windows.envars.Envars",
+    "windows.etwpatch.EtwPatch",
+    "windows.filescan.FileScan",
+    "windows.getservicesids.GetServiceSIDs",
+    "windows.getsids.GetSIDs",
+    "windows.handles.Handles",
+    "windows.hollowprocesses.HollowProcesses",
+    "windows.iat.IAT",
+    "windows.info.Info",
+    "windows.joblinks.JobLinks",
+    "windows.kpcrs.KPCRs",
+    "windows.ldrmodules.LdrModules",
+    "windows.malfind.Malfind",
+    "windows.malware.drivermodule.DriverModule",
+    "windows.malware.hollowprocesses.HollowProcesses",
+    "windows.malware.ldrmodules.LdrModules",
+    "windows.malware.malfind.Malfind",
+    "windows.malware.pebmasquerade.PebMasquerade",
+    "windows.malware.processghosting.ProcessGhosting",
+    "windows.malware.psxview.PsXView",
+    "windows.malware.skeleton_key_check.Skeleton_Key_Check",
+    "windows.malware.suspicious_threads.SuspiciousThreads",
+    "windows.malware.svcdiff.SvcDiff",
+    "windows.malware.unhooked_system_calls.UnhookedSystemCalls",
+    "windows.mbrscan.MBRScan",
+    "windows.memmap.Memmap",
+    "windows.modscan.ModScan",
+    "windows.modules.Modules",
+    "windows.mutantscan.MutantScan",
+    "windows.netscan.NetScan",
+    "windows.netstat.NetStat",
+    "windows.orphan_kernel_threads.Threads",
+    "windows.pe_symbols.PESymbols",
+    "windows.poolscanner.PoolScanner",
+    "windows.privileges.Privs",
+    "windows.processghosting.ProcessGhosting",
+    "windows.pslist.PsList",
+    "windows.psscan.PsScan",
+    "windows.pstree.PsTree",
+    "windows.psxview.PsXView",
+    "windows.registry.amcache.Amcache",
+    "windows.registry.certificates.Certificates",
+    "windows.registry.getcellroutine.GetCellRoutine",
+    "windows.registry.hivelist.HiveList",
+    "windows.registry.hivescan.HiveScan",
+    "windows.registry.printkey.PrintKey",
+    "windows.registry.scheduled_tasks.ScheduledTasks",
+    "windows.registry.userassist.UserAssist",
+    "windows.scheduled_tasks.ScheduledTasks",
+    "windows.sessions.Sessions",
+    "windows.shimcachemem.ShimcacheMem",
+    "windows.skeleton_key_check.Skeleton_Key_Check",
+    "windows.ssdt.SSDT",
+    "windows.statistics.Statistics",
+    "windows.suspended_threads.SuspendedThreads",
+    "windows.suspicious_threads.SuspiciousThreads",
+    "windows.svcdiff.SvcDiff",
+    "windows.svclist.SvcList",
+    "windows.svcscan.SvcScan",
+    "windows.symlinkscan.SymlinkScan",
+    "windows.thrdscan.ThrdScan",
+    "windows.threads.Threads",
+    "windows.timers.Timers",
+    "windows.truecrypt.Passphrase",
+    "windows.unhooked_system_calls.unhooked_system_calls",
+    "windows.unloadedmodules.UnloadedModules",
+    "windows.vadinfo.VadInfo",
+    "windows.vadregexscan.VadRegExScan",
+    "windows.vadwalk.VadWalk",
+    "windows.verinfo.VerInfo",
+    "windows.virtmap.VirtMap",
+    "windows.windows.Windows",
+    "windows.windowstations.WindowStations",
+})
+
+PLUGIN_WHITELIST_LINUX = frozenset({
+    # Placeholder. Will be populated when a Linux acquisition lands.
+    "linux.pslist.PsList",
+    "linux.psaux.PsAux",
+    "linux.lsmod.Lsmod",
+    "linux.bash.Bash",
+    "linux.malfind.Malfind",
+    "linux.check_modules.Check_modules",
+    "linux.check_syscall.Check_syscall",
+    "linux.check_idt.Check_idt",
+    "linux.ip.Link",
+    "linux.boottime.Boottime",
+})
+
+# Per-plugin timeout overrides (seconds). Plugins not listed here use
+# the caller's per_plugin_timeout argument (default 300). The values
+# are observed upper bounds + margin from running each plugin on a
+# 4 GiB Windows Server 2022 dump, with safety factor 3-5x.
+#
+# Rationale:
+#   - Fast metadata plugins: 30s (info, statistics, version queries)
+#   - Process-list family: 60s (linear walk of EPROCESS / handle table)
+#   - Network plugins: 90s (deep scan with corruption-tolerance)
+#   - Memory scanners (malfind, mutantscan, filescan): 300s
+#     (linear scan of all RAM with pattern matching)
+#   - Registry plugins: 60s (hive parsing is fast once mapped)
+#   - Kernel/driver scanners: 180s (heuristic detection)
+
+PLUGIN_TIMEOUTS = {
+    # Fast metadata
+    "windows.info.Info":                  30,
+    "windows.statistics.Statistics":       30,
+    "windows.verinfo.VerInfo":             30,
+    "windows.kpcrs.KPCRs":                 30,
+    "windows.sessions.Sessions":           30,
+    "windows.envars.Envars":               60,
+    # Process-list family
+    "windows.pslist.PsList":               60,
+    "windows.pstree.PsTree":               60,
+    "windows.cmdline.CmdLine":             60,
+    "windows.handles.Handles":            120,
+    "windows.dlllist.DllList":            120,
+    "windows.getsids.GetSIDs":             60,
+    "windows.privileges.Privs":            60,
+    # Network
+    "windows.netscan.NetScan":             90,
+    "windows.netstat.NetStat":             90,
+    # Memory-wide scanners
+    "windows.psscan.PsScan":               180,
+    "windows.modscan.ModScan":              180,
+    "windows.filescan.FileScan":            300,
+    "windows.mutantscan.MutantScan":        180,
+    "windows.thrdscan.ThrdScan":            180,
+    "windows.driverscan.DriverScan":        180,
+    "windows.poolscanner.PoolScanner":      300,
+    "windows.symlinkscan.SymlinkScan":      120,
+    # Code injection / malware namespace
+    "windows.malware.malfind.Malfind":            300,
+    "windows.malfind.Malfind":                    300,
+    "windows.malware.ldrmodules.LdrModules":      180,
+    "windows.ldrmodules.LdrModules":              180,
+    "windows.malware.hollowprocesses.HollowProcesses": 240,
+    "windows.hollowprocesses.HollowProcesses":         240,
+    "windows.malware.processghosting.ProcessGhosting": 180,
+    "windows.processghosting.ProcessGhosting":         180,
+    "windows.malware.suspicious_threads.SuspiciousThreads": 180,
+    "windows.suspicious_threads.SuspiciousThreads":         180,
+    # Kernel / rootkit
+    "windows.modules.Modules":              60,
+    "windows.ssdt.SSDT":                    60,
+    "windows.callbacks.Callbacks":          90,
+    "windows.driverirp.DriverIrp":          120,
+    # Registry
+    "windows.registry.hivelist.HiveList":   60,
+    "windows.registry.printkey.PrintKey":   90,
+    "windows.amcache.Amcache":              90,
+}
+
+
+def _preset_plugin_list(
+    preset: str,
+    os_hint: str,
+    custom_plugins: Optional[list[str]] = None,
+) -> list[str]:
     """Resolve a (preset, os_hint) pair into the Vol3 plugin FQN list.
 
-    :raises ValueError: if the combination is not supported in this
-        revision (E3 supports only fast/windows and fast/linux).
+    For preset="custom" the caller supplies the explicit list via
+    `custom_plugins`. Every plugin is validated against the OS-specific
+    whitelist (PLUGIN_WHITELIST_WINDOWS / PLUGIN_WHITELIST_LINUX) to
+    refuse output-binary plugins (file dumps) and prevent typos from
+    silently invoking nothing.
+
+    :raises ValueError: if the combination is not supported, or if
+        a custom plugin is missing/empty/not whitelisted.
     """
     if preset == "fast":
-        if os_hint == "linux":
-            return list(PRESET_FAST_LINUX)
-        return list(PRESET_FAST_WINDOWS)
+        return list(PRESET_FAST_LINUX if os_hint == "linux"
+                    else PRESET_FAST_WINDOWS)
+
+    if preset == "full":
+        return list(PRESET_FULL_LINUX if os_hint == "linux"
+                    else PRESET_FULL_WINDOWS)
+
+    if preset == "custom":
+        if not custom_plugins:
+            raise ValueError(
+                "preset='custom' requires a non-empty 'plugins' list"
+            )
+        whitelist = (PLUGIN_WHITELIST_LINUX if os_hint == "linux"
+                     else PLUGIN_WHITELIST_WINDOWS)
+        rejected = [p for p in custom_plugins if p not in whitelist]
+        if rejected:
+            raise ValueError(
+                f"custom plugin(s) not in whitelist for os={os_hint}: "
+                f"{rejected}. Plugins producing binary file output "
+                f"(dumpfiles, pedump, strings) are excluded by design."
+            )
+        # Preserve caller-supplied order (analyst may want a specific
+        # sequence, e.g. info first then everything else).
+        return list(custom_plugins)
+
     raise ValueError(
-        f"preset {preset!r} not supported yet (E3 supports only 'fast'); "
-        f"E4 will add 'full' and 'custom'"
+        f"preset {preset!r} not supported; supported: 'fast', 'full', 'custom'"
     )
 
 
@@ -430,9 +692,9 @@ class VolatilityAnalyzer:
     """
 
     name = "volatility"
-    version = "0.1.0"
+    version = "0.2.0"
 
-    SUPPORTED_PRESETS = frozenset({"fast"})  # E4: + "full", "custom"
+    SUPPORTED_PRESETS = frozenset({"fast", "full", "custom"})
 
     def __init__(self, vol_cache_dir: Path) -> None:
         """:param vol_cache_dir: XDG_CACHE_HOME for Vol3 subprocesses
@@ -556,24 +818,36 @@ class VolatilityAnalyzer:
         log.info("[volatility] OS hint resolved: %s", os_hint)
 
         # ----- STEP 3: preset plugin list -----
-        plugin_list = _preset_plugin_list(preset, os_hint)
+        plugin_list = _preset_plugin_list(
+            preset, os_hint, custom_plugins=plugins,
+        )
         log.info(
             "[volatility] preset=%s os=%s -> %d plugins: %s",
             preset, os_hint, len(plugin_list), plugin_list,
         )
 
         # ----- STEP 4: serial plugin execution -----
+        # Each plugin gets its tailored timeout from PLUGIN_TIMEOUTS,
+        # falling back to per_plugin_timeout (the caller-supplied
+        # default). Memory-wide scanners (malfind, filescan) get 300s;
+        # metadata plugins get 30s. Differentiated timeouts prevent a
+        # slow plugin from blocking the loop while letting a hung
+        # plugin fail fast.
         t_plug_start = time.monotonic()
         plugin_results: dict[str, dict] = {}
         counts = {"ok": 0, "failed": 0, "timeout": 0, "parse_error": 0}
 
         for plugin_name in plugin_list:
-            log.info("[volatility] running plugin: %s", plugin_name)
+            this_timeout = PLUGIN_TIMEOUTS.get(plugin_name, per_plugin_timeout)
+            log.info(
+                "[volatility] running plugin: %s (timeout=%ds)",
+                plugin_name, this_timeout,
+            )
             result = run_plugin(
                 dump_path=dump_path,
                 plugin_name=plugin_name,
                 cache_dir=self.vol_cache_dir,
-                timeout=per_plugin_timeout,
+                timeout=this_timeout,
             )
             plugin_results[plugin_name] = result
             status = result.get("status", "failed")

@@ -68,7 +68,7 @@ _KNOWN_ANALYZERS = {"noop", "volatility"}
 # accepted in E3; E4 will extend with "full" and "custom".
 _SUPPORTED_PRESETS = {
     "noop":       None,
-    "volatility": {"fast"},
+    "volatility": {"fast", "full", "custom"},
 }
 
 # Role required to call any /api/v1/* endpoint. Same name as in the
@@ -258,6 +258,33 @@ def trigger_analysis_endpoint(acquisition_id: str):
             ),
         }), 400
 
+    # Pre-validate custom plugin list at API level (immediate 400),
+    # so the user gets feedback before a job is created and the
+    # asynchronous worker fails. We check against the UNION of OS
+    # whitelists because os_hint is resolved by the runner from the
+    # acquisition report metadata, not known here. The runner will
+    # still enforce the OS-specific whitelist when it actually runs.
+    if analyzer_name == "volatility" and preset == "custom" and plugins:
+        from forensicnova_analyzer.analyzers.volatility import (
+            PLUGIN_WHITELIST_WINDOWS, PLUGIN_WHITELIST_LINUX,
+        )
+        combined_whitelist = PLUGIN_WHITELIST_WINDOWS | PLUGIN_WHITELIST_LINUX
+        rejected = [p for p in plugins if p not in combined_whitelist]
+        if rejected:
+            return jsonify({
+                "error":   "unknown_plugins",
+                "message": (
+                    "Some plugins are not in the whitelist. Plugins producing "
+                    "binary file output (dumpfiles, pedump, strings) are "
+                    "excluded by design."
+                ),
+                "rejected_plugins": rejected,
+                "hint": (
+                    "Use FQN format (e.g. 'windows.malware.malfind.Malfind'). "
+                    "See /api/v1/plugins for the full whitelist."
+                ),
+            }), 400
+
     # Operator identity comes from the Keystone-validated token, not
     # from the request body. before_request already ensured the token
     # is valid and has the forensic_analyst role, so HTTP_X_USER_NAME
@@ -352,6 +379,61 @@ def list_jobs_endpoint():
     jobs = _get_jobs()
     records = jobs.list_jobs()
     return jsonify({"count": len(records), "jobs": records}), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/plugins — discover available presets + whitelist (E4)
+# ---------------------------------------------------------------------------
+
+@api_v1_bp.route("/plugins", methods=["GET"])
+def list_plugins_endpoint():
+    """Discover available analyzers, presets, and custom plugin whitelist.
+
+    Used by clients (Horizon dashboard, scripted callers) to populate
+    selection UIs and validate plugin names before submitting a custom
+    analysis request.
+
+    Returns a structured catalogue:
+        {
+          "analyzers":   ["noop", "volatility"],
+          "volatility": {
+            "presets": {
+              "fast": [...],   # plugins included in fast preset (Windows)
+              "full": [...],   # plugins included in full preset (Windows)
+              "custom": "see plugin_whitelist"
+            },
+            "plugin_whitelist": {
+              "windows": [...],  # sorted FQN list, ~88 plugins
+              "linux":   [...],  # sorted FQN list, placeholder
+            }
+          }
+        }
+    """
+    from forensicnova_analyzer.analyzers.volatility import (
+        PRESET_FAST_WINDOWS, PRESET_FAST_LINUX,
+        PRESET_FULL_WINDOWS, PRESET_FULL_LINUX,
+        PLUGIN_WHITELIST_WINDOWS, PLUGIN_WHITELIST_LINUX,
+    )
+    return jsonify({
+        "analyzers": sorted(_KNOWN_ANALYZERS),
+        "volatility": {
+            "presets": {
+                "fast": {
+                    "windows": list(PRESET_FAST_WINDOWS),
+                    "linux":   list(PRESET_FAST_LINUX),
+                },
+                "full": {
+                    "windows": list(PRESET_FULL_WINDOWS),
+                    "linux":   list(PRESET_FULL_LINUX),
+                },
+                "custom": "see plugin_whitelist",
+            },
+            "plugin_whitelist": {
+                "windows": sorted(PLUGIN_WHITELIST_WINDOWS),
+                "linux":   sorted(PLUGIN_WHITELIST_LINUX),
+            },
+        },
+    }), 200
 
 
 # ---------------------------------------------------------------------------
