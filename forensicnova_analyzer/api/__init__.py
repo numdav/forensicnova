@@ -64,3 +64,9 @@ def version():
         "service": "forensicnova-analyzer",
         "version": __version__,
     }), 200
+
+# Trigger route registration: importing v1 here causes Flask to
+# execute the @api_v1_bp.route(...) decorators in v1.py at package
+# import time. Without this line v1.py would never be imported and
+# the routes would silently not exist.
+from . import v1  # noqa: F401
