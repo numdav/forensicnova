@@ -1,0 +1,164 @@
+{% extends 'base.html' %}
+{% load i18n %}
+
+{% block title %}{% blocktrans %}Analysis: {{ analysis_id }}{% endblocktrans %}{% endblock %}
+
+{% block page_header %}
+    {% include "horizon/common/_page_header.html" with title=_("Analysis detail") %}
+{% endblock page_header %}
+
+{% block main %}
+<div class="content_body">
+
+    {% if not analysis %}
+        <div class="alert alert-warning">
+            {% trans "No analysis loaded — see flash messages above." %}
+        </div>
+    {% else %}
+
+    {# ---- Top toolbar ---- #}
+    <div style="margin-bottom: 1em;">
+        <a href="{% url 'horizon:dfir:analyses:download_json' analysis_id %}"
+           class="btn btn-primary">
+            <span class="fa fa-download"></span>
+            {% trans "Download JSON" %}
+        </a>
+        <a href="{% url 'horizon:dfir:analyses:index' %}"
+           class="btn btn-default">
+            {% trans "Back to list" %}
+        </a>
+    </div>
+
+    {# ---- Identity block ---- #}
+    <h3>{% trans "Identity" %}</h3>
+    <table class="table table-bordered">
+        <tr><th style="width: 24em;">{% trans "Analysis ID" %}</th>
+            <td><code>{{ analysis_id }}</code></td></tr>
+        <tr><th>{% trans "Schema version" %}</th>
+            <td>{{ analysis.schema_version|default:"—" }}</td></tr>
+        <tr><th>{% trans "Acquisition ID" %}</th>
+            <td>
+                {% if analysis.acquisition_id %}
+                <a href="{% url 'horizon:dfir:acquisitions:detail' analysis.acquisition_id %}">
+                    <code>{{ analysis.acquisition_id }}</code>
+                </a>
+                {% else %}—{% endif %}
+            </td></tr>
+        <tr><th>{% trans "Operator" %}</th>
+            <td>{{ analysis.operator|default:"—" }}</td></tr>
+        <tr><th>{% trans "Started" %}</th>
+            <td>{{ analysis.timestamps.started_at|default:"—" }}</td></tr>
+        <tr><th>{% trans "Completed" %}</th>
+            <td>{{ analysis.timestamps.completed_at|default:"—" }}</td></tr>
+    </table>
+
+    {# ---- Analyzer config ---- #}
+    <h3>{% trans "Analyzer configuration" %}</h3>
+    <table class="table table-bordered">
+        <tr><th style="width: 24em;">{% trans "Analyzer" %}</th>
+            <td>{{ analysis.analyzer|default:"—" }}
+                ({{ analysis.analyzer_version|default:"—" }})</td></tr>
+        <tr><th>{% trans "Preset" %}</th>
+            <td>{{ analysis.preset|default:"—" }}</td></tr>
+        {% if analysis.plugins %}
+        <tr><th>{% trans "Custom plugins requested" %}</th>
+            <td>
+                {% for p in analysis.plugins %}
+                    <code>{{ p }}</code>{% if not forloop.last %},{% endif %}
+                {% endfor %}
+            </td></tr>
+        {% endif %}
+        <tr><th>{% trans "Volatility 3 version" %}</th>
+            <td>{{ analysis.result.vol3_version|default:"—" }}</td></tr>
+        <tr><th>{% trans "OS hint" %}</th>
+            <td>{{ analysis.result.os_hint|default:"—" }}</td></tr>
+    </table>
+
+    {# ---- Coherence check ---- #}
+    <h3>{% trans "Coherence check (triple-witness)" %}</h3>
+    {% if analysis.coherence_check.hashes_match_report %}
+        <div class="alert alert-success">
+            <span class="fa fa-check"></span>
+            <strong>{% trans "PASS" %}</strong> —
+            {% trans "all three hash measurements agree (acquisition / download / analyzer)." %}
+        </div>
+    {% else %}
+        <div class="alert alert-danger">
+            <span class="fa fa-times"></span>
+            <strong>{% trans "FAIL" %}</strong> —
+            {% trans "hash mismatch detected. The analysis result MUST NOT be trusted as forensic evidence." %}
+        </div>
+    {% endif %}
+    <table class="table table-bordered">
+        <tr><th style="width: 24em;">{% trans "Expected MD5 (from report)" %}</th>
+            <td><code>{{ analysis.coherence_check.expected_md5 }}</code></td></tr>
+        <tr><th>{% trans "Analyzer-read MD5" %}</th>
+            <td><code>{{ analysis.coherence_check.analyzer_read_md5 }}</code></td></tr>
+        <tr><th>{% trans "Expected SHA-1 (from report)" %}</th>
+            <td><code>{{ analysis.coherence_check.expected_sha1 }}</code></td></tr>
+        <tr><th>{% trans "Analyzer-read SHA-1" %}</th>
+            <td><code>{{ analysis.coherence_check.analyzer_read_sha1 }}</code></td></tr>
+        <tr><th>{% trans "Dump size (bytes)" %}</th>
+            <td>{{ analysis.coherence_check.analyzer_size_bytes|default:"—" }}</td></tr>
+    </table>
+
+    {# ---- Timings ---- #}
+    <h3>{% trans "Timing" %}</h3>
+    <table class="table table-bordered">
+        <tr><th style="width: 24em;">{% trans "Total duration (s)" %}</th>
+            <td>{{ analysis.result.duration_seconds|default:"—" }}</td></tr>
+        <tr><th>{% trans "Hash phase (s)" %}</th>
+            <td>{{ analysis.result.hash_phase_seconds|default:"—" }}</td></tr>
+        <tr><th>{% trans "Plugin phase (s)" %}</th>
+            <td>{{ analysis.result.plugin_phase_seconds|default:"—" }}</td></tr>
+        <tr><th>{% trans "Throughput (MiB/s)" %}</th>
+            <td>{{ analysis.result.throughput_mib_per_s|default:"—" }}</td></tr>
+    </table>
+
+    {# ---- Per-plugin summary (no rows, just status + counts) ---- #}
+    {% if plugins_summary %}
+    <h3>{% trans "Plugin results" %}
+        ({{ analysis.result.summary_counts.ok|default:0 }}
+        {% trans "ok" %},
+        {{ analysis.result.summary_counts.failed|default:0 }}
+        {% trans "failed" %},
+        {{ analysis.result.summary_counts.timeout|default:0 }}
+        {% trans "timeout" %},
+        {{ analysis.result.summary_counts.parse_error|default:0 }}
+        {% trans "parse_error" %})
+    </h3>
+    <table class="table table-striped table-bordered">
+        <thead><tr>
+            <th>{% trans "Plugin" %}</th>
+            <th>{% trans "Status" %}</th>
+            <th>{% trans "Rows" %}</th>
+            <th>{% trans "Duration (s)" %}</th>
+            <th>{% trans "Error" %}</th>
+        </tr></thead>
+        <tbody>
+        {% for p in plugins_summary %}
+        <tr>
+            <td><code>{{ p.plugin }}</code></td>
+            <td>{% if p.status == "ok" %}
+                <span style="color: green;"><strong>✓ {{ p.status }}</strong></span>
+                {% elif p.status == "timeout" %}
+                <span style="color: orange;"><strong>⏱ {{ p.status }}</strong></span>
+                {% else %}
+                <span style="color: red;"><strong>✗ {{ p.status }}</strong></span>
+                {% endif %}
+            </td>
+            <td>{{ p.row_count|default:0 }}</td>
+            <td>{{ p.duration_seconds|default:"—" }}</td>
+            <td>{% if p.error_message %}<small>{{ p.error_message }}</small>{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <p><em>
+        {% trans "Full plugin output (per-row data) is available via the Download JSON button above." %}
+    </em></p>
+    {% endif %}
+
+    {% endif %}{# end if analysis #}
+</div>
+{% endblock %}
