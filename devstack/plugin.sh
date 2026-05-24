@@ -603,10 +603,17 @@ fdash_install_enabled_files() {
 
 fdash_remove_enabled_files() {
     fdash_log "clean" "removing forensicnova-dashboard enabled/ files"
-    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9000_dfir.py
-    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9010_dfir_forensics_panelgroup.py
-    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9020_dfir_acquisitions.py
-    sudo rm -f "${HORIZON_LOCAL_ENABLED_DIR}"/_9030_dfir_new_acquisition.py
+    # Symmetric to fdash_install_enabled_files: glob the repo's
+    # enabled/ directory and remove the corresponding installed
+    # copies from HORIZON_LOCAL_ENABLED_DIR. Auto-maintained: every
+    # new _9NNN_*.py we add (or remove) in the repo is picked up
+    # without having to keep two lists in sync.
+    local f
+    for f in "$FORENSICNOVA_DASHBOARD_DIR"/forensicnova_dashboard/enabled/_*.py; do
+        [[ -f "$f" ]] || continue
+        local target="${HORIZON_LOCAL_ENABLED_DIR}/$(basename "$f")"
+        sudo rm -f "$target"
+    done
 }
 
 # Horizon serves static assets (CSS, JS) from a Django collectstatic dir.
