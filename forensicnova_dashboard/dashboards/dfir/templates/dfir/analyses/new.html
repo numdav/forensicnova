@@ -1,0 +1,114 @@
+{% extends 'base.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "New analysis" %}{% endblock %}
+
+{% block page_header %}
+    {% include "horizon/common/_page_header.html" with title=_("New analysis") %}
+{% endblock page_header %}
+
+{% block main %}
+<div class="content_body">
+
+  <p class="alert alert-info">
+    {% blocktrans %}
+    Launching an analysis on acquisition
+    <code>{{ acquisition_id }}</code>. The job runs asynchronously on
+    the analyzer backend: download (if not cached) + triple-witness
+    hash check + plugin execution + upload of the result JSON.
+    {% endblocktrans %}
+  </p>
+
+  <form method="post" class="form-horizontal">
+    {% csrf_token %}
+
+    {# ----- Analyzer ----- #}
+    <div class="form-group">
+      <label class="col-sm-3 control-label" for="id_analyzer">
+        {{ form.analyzer.label }}
+      </label>
+      <div class="col-sm-7">
+        {{ form.analyzer }}
+        <span class="help-block">{{ form.analyzer.help_text }}</span>
+        {% if form.analyzer.errors %}
+          <div class="alert alert-danger">{{ form.analyzer.errors }}</div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ----- Preset (visible only when analyzer=volatility) ----- #}
+    <div class="form-group" id="row-preset">
+      <label class="col-sm-3 control-label" for="id_preset">
+        {{ form.preset.label }}
+      </label>
+      <div class="col-sm-7">
+        {{ form.preset }}
+        <span class="help-block">{{ form.preset.help_text }}</span>
+        {% if form.preset.errors %}
+          <div class="alert alert-danger">{{ form.preset.errors }}</div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ----- Plugins (visible only when preset=custom) ----- #}
+    <div class="form-group" id="row-plugins">
+      <label class="col-sm-3 control-label" for="id_plugins">
+        {{ form.plugins.label }}
+      </label>
+      <div class="col-sm-7">
+        {{ form.plugins }}
+        <span class="help-block">{{ form.plugins.help_text }}</span>
+        {% if form.plugins.errors %}
+          <div class="alert alert-danger">{{ form.plugins.errors }}</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="form-group">
+      <div class="col-sm-offset-3 col-sm-7">
+        <button type="submit" class="btn btn-primary">
+          {% trans "Start analysis" %}
+        </button>
+        <a href="{% url 'horizon:dfir:acquisitions:index' %}"
+           class="btn btn-default">
+          {% trans "Cancel" %}
+        </a>
+      </div>
+    </div>
+  </form>
+
+</div>
+
+<script>
+// Show/hide dependent fields based on analyzer + preset choices.
+// - Preset row visible only when analyzer == 'volatility'.
+// - Plugins row visible only when analyzer == 'volatility' AND preset == 'custom'.
+(function () {
+    function el(id) { return document.getElementById(id); }
+
+    var analyzerSel = el('id_analyzer');
+    var presetSel   = el('id_preset');
+    var rowPreset   = el('row-preset');
+    var rowPlugins  = el('row-plugins');
+    // Style the plugin multi-select so the optgroups are visible at a
+    // glance. ~12 rows = enough to show one full group without scroll.
+    var pluginsSel  = el('id_plugins');
+    if (pluginsSel) {
+        pluginsSel.setAttribute('size', '15');
+        pluginsSel.style.width = '100%';
+    }
+
+    function refresh() {
+        var analyzer = analyzerSel ? analyzerSel.value : '';
+        var preset   = presetSel   ? presetSel.value   : '';
+        if (rowPreset)  rowPreset.style.display  = (analyzer === 'volatility') ? '' : 'none';
+        if (rowPlugins) rowPlugins.style.display = (analyzer === 'volatility' && preset === 'custom') ? '' : 'none';
+    }
+
+    if (analyzerSel) analyzerSel.addEventListener('change', refresh);
+    if (presetSel)   presetSel.addEventListener('change', refresh);
+    refresh();
+})();
+</script>
+
+{% endblock %}

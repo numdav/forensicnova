@@ -1,10 +1,25 @@
 """Views for the Analyses panel.
 
-Three views:
+Five views:
 
   IndexView   — DataTable backed by GET /api/v1/jobs (analyzer backend).
                 Each row is one analyzer job; the row's status and
                 analysis_id determine which row actions are available.
+
+  NewAnalysisView (FormView) — picks analyzer / preset / plugins for a
+                given acquisition_id (passed via URL). POSTs to the
+                analyzer backend, captures the job_id, redirects to the
+                watch page. The form is in analyses/forms.py.
+
+  JobWatchView (TemplateView) — polling page on a single analyzer job.
+                Mirrors new_acquisition/JobWatchView: a thin shell that
+                calls analyzer_job_status_proxy from JS every 2s,
+                renders phase/label/elapsed live, and redirects to the
+                analysis detail page once status='completed'.
+
+  analyzer_job_status_proxy — JSON proxy: takes the user's session
+                cookie, forwards their Keystone token to the analyzer
+                backend as X-Auth-Token, returns the job record as JSON.
 
   DetailView  — Renders the analysis JSON for one analysis_id. Shows
                 meta fields (analyzer, preset, durations, coherence
@@ -25,7 +40,8 @@ from __future__ import annotations
 import logging
 
 from django.contrib import messages
-from django.http import StreamingHttpResponse
+from django.http import JsonResponse, StreamingHttpResponse
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from django.views import generic
 
@@ -33,10 +49,17 @@ from horizon import exceptions, tables as horizon_tables
 
 from forensicnova_dashboard.api import client as fn_api
 from forensicnova_dashboard.dashboards.dfir.analyses import (
+    forms as analysis_forms,
     tables as analysis_tables,
 )
 
 LOG = logging.getLogger(__name__)
+
+# Placeholder used inside reverse() to build a URL template the watch
+# page's JS substitutes with the real analysis_id once the job is
+# done. Lets us keep Django reverse() as single source of truth for
+# the URL pattern without hardcoding the dashboard prefix in JS.
+_ANALYSIS_ID_PLACEHOLDER = "__ANALYSIS_ID__"
 
 
 # ---------------------------------------------------------------------------
@@ -182,3 +205,181 @@ def download_json(request, analysis_id: str):
 def _redirect_to_index():
     from django.shortcuts import redirect
     return redirect("horizon:dfir:analyses:index")
+
+
+# ---------------------------------------------------------------------------
+# New analysis — FormView that submits a POST to the analyzer backend
+# ---------------------------------------------------------------------------
+
+class NewAnalysisView(generic.FormView):
+    """Pick analyzer/preset/plugins for one acquisition_id, then trigger.
+
+    The acquisition_id is captured from the URL (not the form), so the
+    page is opened by clicking the 'Analyze' action on the Acquisitions
+    table — no risk of accidentally analyzing the wrong acquisition by
+    selecting the wrong VM in a dropdown.
+    """
+    template_name = "dfir/analyses/new.html"
+    form_class = analysis_forms.NewAnalysisForm
+    page_title = _("New analysis")
+
+    def get_form_kwargs(self):
+        kw = super().get_form_kwargs()
+        kw["request"] = self.request
+        kw["acquisition_id"] = self.kwargs.get("acquisition_id")
+        return kw
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["acquisition_id"] = self.kwargs.get("acquisition_id")
+        return ctx
+
+    def form_valid(self, form):
+        acquisition_id = self.kwargs["acquisition_id"]
+        analyzer = form.cleaned_data["analyzer"]
+        preset = form.cleaned_data.get("preset") or None
+        plugins = form.cleaned_data.get("plugins") or None
+
+        LOG.info(
+            "horizon -> trigger analysis: user=%s acq=%s analyzer=%s "
+            "preset=%s plugins=%s",
+            getattr(self.request.user, "username", "?"),
+            acquisition_id, analyzer, preset, plugins,
+        )
+        try:
+            resp = fn_api.trigger_analysis(
+                self.request, acquisition_id,
+                analyzer=analyzer, preset=preset, plugins=plugins,
+            )
+        except fn_api.ForensicNovaUnavailable as exc:
+            messages.error(
+                self.request,
+                _("Analyzer service is unreachable: %s") % exc,
+            )
+            return self.form_invalid(form)
+        except fn_api.ForensicNovaForbidden:
+            messages.error(
+                self.request,
+                _("Backend rejected the request (403). "
+                  "Check the forensic_analyst role."),
+            )
+            return self.form_invalid(form)
+        except fn_api.ForensicNovaNotFound:
+            messages.error(
+                self.request,
+                _("Acquisition %s not found in the analyzer backend.")
+                % acquisition_id,
+            )
+            return self.form_invalid(form)
+        except fn_api.ForensicNovaApiError as exc:
+            # The analyzer backend returns 400 with a structured
+            # message for unsupported_preset / unknown_plugins / etc.
+            # Show the message verbatim — it carries the diagnostic
+            # the analyst needs to fix the request.
+            messages.error(
+                self.request,
+                _("Trigger failed: %s") % exc,
+            )
+            return self.form_invalid(form)
+
+        job_id = resp.get("job_id")
+        if not job_id:
+            messages.error(
+                self.request,
+                _("Backend did not return a job_id."),
+            )
+            return self.form_invalid(form)
+
+        messages.info(
+            self.request,
+            _("Analysis started — watching progress…"),
+        )
+        from django.shortcuts import redirect
+        return redirect(
+            "horizon:dfir:analyses:watch", job_id=job_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Job watch — polling page for an in-flight analysis
+# ---------------------------------------------------------------------------
+
+class JobWatchView(generic.TemplateView):
+    """Render a polling page for an analyzer job.
+
+    Same pattern as new_acquisition/JobWatchView, adapted to the
+    analyzer backend: the JS polls analyzer_job_status_proxy every 2s
+    and renders status/phase/elapsed live. On completion it redirects
+    to the analysis detail page, NOT the acquisitions detail page.
+    """
+    template_name = "dfir/analyses/watch.html"
+    page_title = _("Analysis in progress")
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        job_id = self.kwargs["job_id"]
+        ctx["job_id"] = job_id
+
+        try:
+            job = fn_api.get_analyzer_job(self.request, job_id)
+            ctx["initial_status"] = job.get("status")
+            ctx["initial_phase_label"] = job.get("label", "")
+            ctx["acquisition_id"] = job.get("acquisition_id") or ""
+            ctx["analyzer"] = job.get("analyzer") or ""
+            ctx["preset"] = job.get("preset") or ""
+            # If already completed by the time the user loads this
+            # page (rare race) — set a courtesy direct link too.
+            if job.get("status") == "completed":
+                analysis_id = job.get("analysis_id")
+                if analysis_id:
+                    ctx["completed_redirect_url"] = reverse(
+                        "horizon:dfir:analyses:detail",
+                        args=(analysis_id,),
+                    )
+        except fn_api.ForensicNovaApiError as exc:
+            LOG.warning("watch first-paint read failed: %s", exc)
+            ctx["initial_status"] = "pending"
+            ctx["initial_phase_label"] = ""
+            ctx["acquisition_id"] = ""
+            ctx["analyzer"] = ""
+            ctx["preset"] = ""
+
+        # URL the JS polls — points at the Horizon proxy so the
+        # browser's session cookie authenticates without exposing
+        # any X-Auth-Token to JavaScript.
+        ctx["poll_url"] = reverse(
+            "horizon:dfir:analyses:job_status",
+            args=(job_id,),
+        )
+        ctx["analyses_index_url"] = reverse(
+            "horizon:dfir:analyses:index",
+        )
+        # URL template built via Django reverse() with a placeholder.
+        # The watch JS substitutes the real analysis_id at runtime
+        # via a plain string replace — keeping reverse() as the
+        # single source of truth for the URL pattern.
+        ctx["analysis_detail_url_template"] = reverse(
+            "horizon:dfir:analyses:detail",
+            args=(_ANALYSIS_ID_PLACEHOLDER,),
+        )
+        return ctx
+
+
+def analyzer_job_status_proxy(request, job_id: str):
+    """Tiny JSON proxy from Horizon to the analyzer backend.
+
+    The watch JS calls this URL; this code forwards the user's
+    Keystone token to the analyzer service and returns the job record
+    verbatim. Bridges the gap between browser session cookie
+    (authenticates with Horizon) and analyzer auth (X-Auth-Token).
+    """
+    try:
+        job = fn_api.get_analyzer_job(request, job_id)
+    except fn_api.ForensicNovaNotFound:
+        return JsonResponse({"error": "not_found"}, status=404)
+    except fn_api.ForensicNovaApiError as exc:
+        return JsonResponse(
+            {"error": "backend", "detail": str(exc)},
+            status=502,
+        )
+    return JsonResponse(job)

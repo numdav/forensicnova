@@ -91,6 +91,23 @@ class DownloadDumpAction(tables.LinkAction):
         return reverse(self.url, args=(datum["acquisition_id"],))
 
 
+class AnalyzeAction(tables.LinkAction):
+    """Open the New analysis form for this acquisition.
+
+    Pre-fills the acquisition_id via URL so the analyst doesn't have
+    to type or pick it from a dropdown — directly couples the
+    acquisition row with the new-analysis workflow.
+    """
+    name = "analyze"
+    verbose_name = _("Analyze")
+    url = "horizon:dfir:analyses:new"
+    classes = ("btn-primary",)
+    icon = "search"
+
+    def get_link_url(self, datum):
+        return reverse(self.url, args=(datum["acquisition_id"],))
+
+
 class AcquisitionsTable(tables.DataTable):
     started_at = tables.Column(
         "started_at",
@@ -126,6 +143,7 @@ class AcquisitionsTable(tables.DataTable):
         # The DataTable framework needs a unique id per row.
         # We use acquisition_id from the API summary.
         row_actions = (
+            AnalyzeAction,
             DownloadPdfAction,
             DownloadJsonAction,
             DownloadDumpAction,

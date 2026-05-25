@@ -1,0 +1,172 @@
+{% extends 'base.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Analysis in progress" %}{% endblock %}
+
+{% block page_header %}
+    {% include "horizon/common/_page_header.html" with title=_("Analysis in progress") %}
+{% endblock page_header %}
+
+{% block main %}
+<div class="content_body">
+
+<div class="row">
+  <div class="col-md-10 col-md-offset-1">
+
+    <div class="panel panel-info">
+      <div class="panel-heading">
+          <h4 class="panel-title">
+              {% if analyzer %}
+                  {{ analyzer }}{% if preset %} / {{ preset }}{% endif %}
+              {% else %}
+                  {% trans "Job" %} {{ job_id }}
+              {% endif %}
+          </h4>
+      </div>
+      <div class="panel-body">
+
+        <p class="text-muted small">
+            {% trans "Job ID" %}:
+            <span class="font-monospace">{{ job_id }}</span>
+            {% if acquisition_id %}
+              &nbsp;·&nbsp;
+              {% trans "Acquisition" %}:
+              <a href="{% url 'horizon:dfir:acquisitions:detail' acquisition_id %}">
+                <code>{{ acquisition_id }}</code>
+              </a>
+            {% endif %}
+        </p>
+
+        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+          <div>
+            <span id="watch-status" class="label label-info">
+                {{ initial_status|default:"pending" }}
+            </span>
+            <span id="watch-phase-label" style="margin-left:8px;">
+                {{ initial_phase_label }}
+            </span>
+          </div>
+          <div class="text-muted small">
+            <span id="watch-elapsed">0</span> s {% trans "elapsed" %}
+          </div>
+        </div>
+
+        <div class="progress">
+          <div id="watch-progress-bar"
+               class="progress-bar progress-bar-striped active"
+               role="progressbar"
+               style="width: 100%">
+          </div>
+        </div>
+
+        <div id="watch-error" class="alert alert-danger"
+             style="display:none; margin-top:16px;">
+          <strong>{% trans "Analysis failed." %}</strong>
+          <pre id="watch-error-detail" class="font-monospace small"></pre>
+          <a href="{{ analyses_index_url }}" class="btn btn-default btn-sm">
+              {% trans "Back to analyses" %}
+          </a>
+        </div>
+
+        <div id="watch-success" class="alert alert-success"
+             style="display:none; margin-top:16px;">
+          {% trans "Analysis completed — redirecting..." %}
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// Analyzer job record keys (forensicnova_analyzer.jobs):
+//   status          : 'pending' | 'running' | 'completed' | 'failed'
+//   phase           : machine-readable (e.g. 'running_analyzer')
+//   label           : human-readable (e.g. 'Running volatility analyzer')
+//   error_message   : populated when status === 'failed'
+//   elapsed_seconds : float
+//   analysis_id     : populated when status === 'completed'
+(function () {
+    var POLL_URL = "{{ poll_url|escapejs }}";
+    var ANALYSES_INDEX_URL = "{{ analyses_index_url|escapejs }}";
+    var DETAIL_URL_TEMPLATE = "{{ analysis_detail_url_template|escapejs }}";
+    var ANALYSIS_ID_PLACEHOLDER = "__ANALYSIS_ID__";
+    var POLL_MS = 2000;
+
+    function $(id) { return document.getElementById(id); }
+
+    function setStatus(s) {
+        var e = $('watch-status');
+        e.textContent = s;
+        e.className = 'label ' + (
+            s === 'completed' ? 'label-success' :
+            s === 'failed'    ? 'label-danger'  :
+            s === 'running'   ? 'label-info'    :
+                                'label-default'
+        );
+    }
+
+    function poll() {
+        fetch(POLL_URL, { credentials: 'same-origin',
+                          headers: { 'Accept': 'application/json' } })
+        .then(function (r) {
+            if (r.status === 404) {
+                $('watch-error-detail').textContent = 'Job not found.';
+                $('watch-error').style.display = 'block';
+                return null;
+            }
+            if (!r.ok) {
+                setTimeout(poll, POLL_MS);
+                return null;
+            }
+            return r.json();
+        })
+        .then(function (job) {
+            if (!job) return;
+            setStatus(job.status);
+            $('watch-phase-label').textContent =
+                job.label || job.phase || '';
+            if (job.elapsed_seconds != null) {
+                $('watch-elapsed').textContent =
+                    Math.round(job.elapsed_seconds);
+            }
+
+            if (job.status === 'completed') {
+                var bar = $('watch-progress-bar');
+                bar.classList.remove('active');
+                bar.classList.remove('progress-bar-info');
+                bar.classList.add('progress-bar-success');
+                $('watch-success').style.display = 'block';
+                var analysisId = job.analysis_id;
+                if (analysisId) {
+                    setTimeout(function () {
+                        window.location =
+                            DETAIL_URL_TEMPLATE.replace(
+                                ANALYSIS_ID_PLACEHOLDER, analysisId);
+                    }, 1500);
+                }
+                return;
+            }
+            if (job.status === 'failed') {
+                var bar2 = $('watch-progress-bar');
+                bar2.classList.remove('active');
+                bar2.classList.add('progress-bar-danger');
+                $('watch-error-detail').textContent =
+                    job.error_message || 'Unknown error';
+                $('watch-error').style.display = 'block';
+                return;
+            }
+            setTimeout(poll, POLL_MS);
+        })
+        .catch(function () {
+            setTimeout(poll, POLL_MS);
+        });
+    }
+
+    poll();
+})();
+</script>
+
+</div>
+{% endblock %}
