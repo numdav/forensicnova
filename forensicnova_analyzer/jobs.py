@@ -319,6 +319,61 @@ class JobManager:
         return recovered
 
     # ------------------------------------------------------------------
+    # Deletion (manual cleanup)
+    # ------------------------------------------------------------------
+
+    def delete_job(self, job_id: str) -> dict:
+        """Remove a job's persisted record from disk.
+
+        Idempotent: if the job file does not exist the function returns
+        a 'no-op' result and does not raise. Returns the previous job
+        record (with at minimum the analysis_id so the caller can decide
+        whether to cascade-delete the Swift analysis object), or a
+        skeleton dict when the file was absent.
+
+        Concurrency: takes the per-job lock so a delete cannot race
+        against an in-flight write (atomic-rename in _write). The lock
+        entry stays in self._locks after deletion to avoid free-then-
+        re-create races; the memory cost is one RLock per ever-seen
+        job_id, negligible for the expected single-VM workload.
+
+        Why this is a manager-level method and not a thin os.unlink
+        wrapper: the dashboard's Delete action needs to also drop the
+        matching analysis JSON from Swift (if any). Returning the full
+        previous record lets the caller (API endpoint) decide whether
+        to cascade, without re-reading the file.
+        """
+        with self._lock_for(job_id):
+            data = self._read(job_id)
+            p = self._path(job_id)
+            if data is None and not p.exists():
+                log.info("[job=%s] delete: nothing to remove (already gone)",
+                         job_id)
+                return {
+                    "job_id":      job_id,
+                    "deleted":     False,
+                    "analysis_id": None,
+                }
+            try:
+                if p.exists():
+                    os.unlink(str(p))
+            except OSError as exc:
+                log.warning("[job=%s] delete: unlink failed: %s", job_id, exc)
+                return {
+                    "job_id":      job_id,
+                    "deleted":     False,
+                    "analysis_id": (data or {}).get("analysis_id"),
+                    "error":       str(exc),
+                }
+            log.info("[job=%s] DELETED (had analysis_id=%s)",
+                     job_id, (data or {}).get("analysis_id"))
+            return {
+                "job_id":      job_id,
+                "deleted":     True,
+                "analysis_id": (data or {}).get("analysis_id"),
+            }
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 

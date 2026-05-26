@@ -377,6 +377,109 @@ def get_job_endpoint(job_id: str):
 
 
 # ---------------------------------------------------------------------------
+# DELETE /api/v1/jobs/<job_id> — remove a job + cascade Swift analysis JSON
+# ---------------------------------------------------------------------------
+#
+# Cleanup utility primarily intended for the dashboard's Delete action
+# in the Analyses table. Two responsibilities, both idempotent:
+#
+#   1. If the job had produced a Swift analysis-*.json (i.e. status was
+#      'completed' before the delete), remove it from the Swift
+#      'forensics' container. Missing object = no-op (200, deleted=false).
+#
+#   2. Remove the job's persisted record from the analyzer's local jobs/
+#      directory. Missing job file = no-op (200, deleted=false).
+#
+# Both legs are reported separately in the response so the operator can
+# tell whether the cascade actually had something to delete on Swift.
+# A common case post-unstack/stack: the job file lingers but the Swift
+# object is already gone (container was rebuilt). The endpoint returns
+# 200 with cascade_swift.deleted=false and removed_job=true, which the
+# dashboard surfaces as a benign "cleaned up orphan job".
+#
+# Authorization: forensic_analyst role required (enforced by the
+# before_request hook). No separate admin role: the lab's analyst is
+# expected to manage their own analyses lifecycle. Production
+# hardening would gate this behind an additional 'admin' role.
+
+@api_v1_bp.route("/jobs/<job_id>", methods=["DELETE"])
+def delete_job_endpoint(job_id: str):
+    """Delete an analyzer job + (if any) the associated Swift analysis JSON.
+
+    Returns 200 with a breakdown of what was actually removed. Never
+    raises 404 — a missing job is reported as removed_job=false.
+    """
+    cfg = _get_cfg()
+    jobs = _get_jobs()
+
+    # Read the job FIRST (before deleting the local file) so we know
+    # the analysis_id to cascade-delete from Swift, and so we can report
+    # back any acquisition_id / analyzer metadata the dashboard might
+    # display in a flash message.
+    record = jobs.get_job(job_id)
+    job_status = (record or {}).get("status")
+    job_analyzer = (record or {}).get("analyzer")
+    analysis_id = (record or {}).get("analysis_id")
+    acquisition_id = (record or {}).get("acquisition_id")
+
+    # --- Leg 1: Swift cascade ---
+    cascade_result: dict
+    if analysis_id:
+        try:
+            cascade_result = swift.delete_analysis_object(analysis_id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "delete_job: Swift cascade failed for job=%s analysis_id=%s",
+                job_id, analysis_id,
+            )
+            # Swift failure does NOT abort the job-file delete: the
+            # operator's stated intent is "get rid of this job",
+            # leaving a stale job pointing at an unreachable Swift
+            # object would defeat the purpose. We still report the
+            # failure so it's visible.
+            cascade_result = {
+                "object_name": analysis_id,
+                "deleted":     False,
+                "status":      "error",
+                "error":       str(exc),
+            }
+    else:
+        cascade_result = {
+            "object_name": None,
+            "deleted":     False,
+            "status":      "no_analysis_id",
+            "error":       None,
+        }
+
+    # --- Leg 2: local job file delete ---
+    try:
+        local_result = jobs.delete_job(job_id)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("delete_job: local file delete failed for job=%s", job_id)
+        return jsonify({
+            "error":          "internal_error",
+            "message":        f"could not delete local job file: {exc}",
+            "cascade_swift":  cascade_result,
+        }), 500
+
+    response_body = {
+        "job_id":         job_id,
+        "removed_job":    bool(local_result.get("deleted")),
+        "previous_status": job_status,
+        "analyzer":       job_analyzer,
+        "acquisition_id": acquisition_id,
+        "analysis_id":    analysis_id,
+        "cascade_swift":  cascade_result,
+    }
+    log.info(
+        "DELETE /api/v1/jobs/%s -> removed_job=%s swift=%s (was status=%s)",
+        job_id, response_body["removed_job"],
+        cascade_result.get("status"), job_status,
+    )
+    return jsonify(response_body), 200
+
+
+# ---------------------------------------------------------------------------
 # GET /api/v1/jobs — list all analyzer jobs
 # ---------------------------------------------------------------------------
 

@@ -517,6 +517,86 @@ def verify_dump_hashes(
     )
 
 
+def delete_analysis_object(
+    object_name: str,
+    cfg,
+    password: Optional[str] = None,
+) -> dict:
+    """Delete an analysis object from the Swift `forensics` container.
+
+    Used by the dashboard's Delete action to remove the analysis JSON
+    that a completed job produced. The deletion is **idempotent**:
+    a missing object is treated as a successful no-op (status='not_found')
+    rather than an error, so the caller can safely call this even when
+    the upstream job record has lost track of which JSON it produced
+    (e.g. unstack/stack cycle, where Swift is wiped but the job file
+    survives on the analyzer's local disk).
+
+    Auth: same dfir-tester service account used by the rest of this
+    module. The forensic_analyst role check happens upstream in the
+    API blueprint's before_request hook.
+
+    :param object_name:  the Swift object name (== analysis_id), e.g.
+                         'analysis-volatility-fast-<acq>-<UTC>-<job8>.json'
+    :param cfg:          AnalyzerConfig instance
+    :param password:     optional override; if None, read from env var
+
+    :returns: dict with keys:
+        - object_name (str): echo of the input
+        - deleted     (bool): True if Swift removed the object, False
+                              if it was already absent
+        - status      (str):  'deleted' | 'not_found' | 'error'
+        - error       (str|None): present only when status='error'
+    """
+    password = _resolve_password(password)
+    container = cfg.swift_container
+    url, token = _authenticate(cfg, password)
+
+    log.info(
+        "deleting analysis: swift://%s/%s",
+        container, object_name,
+    )
+
+    try:
+        swiftclient.client.delete_object(
+            url=url,
+            token=token,
+            container=container,
+            name=object_name,
+        )
+    except swiftclient.exceptions.ClientException as exc:
+        http_status = getattr(exc, "http_status", None)
+        if http_status == 404:
+            log.info(
+                "delete: object swift://%s/%s already absent (404, no-op)",
+                container, object_name,
+            )
+            return {
+                "object_name": object_name,
+                "deleted":     False,
+                "status":      "not_found",
+                "error":       None,
+            }
+        log.error("delete failed: %s", exc)
+        return {
+            "object_name": object_name,
+            "deleted":     False,
+            "status":      "error",
+            "error":       str(exc),
+        }
+
+    log.info(
+        "analysis deleted: swift://%s/%s",
+        container, object_name,
+    )
+    return {
+        "object_name": object_name,
+        "deleted":     True,
+        "status":      "deleted",
+        "error":       None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------

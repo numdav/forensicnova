@@ -191,6 +191,34 @@ def _post(
     return _parse_or_raise(resp, url)
 
 
+def _delete(
+    request,
+    path: str,
+    *,
+    service_type: str = _CATALOG_SERVICE_TYPE,
+    fallback_env: str = _FALLBACK_URL_ENV,
+) -> dict:
+    """HTTP DELETE helper, symmetric to _get and _post.
+
+    Used by Horizon Delete actions (e.g. delete_analyzer_job). The
+    backend's DELETE endpoints are idempotent: they return 200 with a
+    structured body even when the target was already absent, so this
+    helper does not special-case 404 the way _stream does.
+    """
+    url = f"{_endpoint_url(request, service_type, fallback_env)}{path}"
+    try:
+        resp = requests.delete(
+            url,
+            headers=_headers(request),
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_FAST),
+        )
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise ForensicNovaUnavailable(
+            f"ForensicNova unreachable at {url}: {exc}"
+        ) from exc
+    return _parse_or_raise(resp, url)
+
+
 def _stream(
     request,
     path: str,
@@ -340,6 +368,14 @@ def _post_analyzer(request, path: str, body: Optional[dict] = None) -> dict:
     )
 
 
+def _delete_analyzer(request, path: str) -> dict:
+    return _delete(
+        request, path,
+        service_type=_CATALOG_SERVICE_TYPE_ANALYZER,
+        fallback_env=_FALLBACK_URL_ENV_ANALYZER,
+    )
+
+
 def list_analyses_for_acquisition(
     request, acquisition_id: str,
 ) -> list[dict]:
@@ -432,3 +468,32 @@ def stream_analysis_json(request, analysis_id: str) -> requests.Response:
         service_type=_CATALOG_SERVICE_TYPE_ANALYZER,
         fallback_env=_FALLBACK_URL_ENV_ANALYZER,
     )
+
+
+def delete_analyzer_job(request, job_id: str) -> dict:
+    """DELETE /api/v1/jobs/<job_id> on the analyzer backend.
+
+    Removes the job record from the analyzer's local jobs/ directory
+    AND cascades the deletion of any Swift analysis-*.json object that
+    job produced. Idempotent at both legs: missing job file or already-
+    deleted Swift object both yield a successful 200 with the relevant
+    deleted=false flag in the response body.
+
+    Used by the Analyses table's Delete row action. Useful especially
+    after an unstack/stack cycle to clear orphan jobs whose Swift
+    objects no longer exist (the container is rebuilt empty), and for
+    routine cleanup of test/failed runs during development.
+
+    Returns the structured response body, useful for the dashboard's
+    flash messages:
+        {
+          "job_id":          "<uuid>",
+          "removed_job":     bool,
+          "previous_status": "completed" | "failed" | ...,
+          "analyzer":        "volatility",
+          "acquisition_id":  "<uuid>",
+          "analysis_id":     "analysis-...json" or None,
+          "cascade_swift":   {"object_name": ..., "deleted": bool, "status": ...},
+        }
+    """
+    return _delete_analyzer(request, f"/api/v1/jobs/{job_id}")
