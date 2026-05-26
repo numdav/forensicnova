@@ -619,8 +619,8 @@ PLUGIN_TIMEOUTS = {
     "windows.malware.suspicious_threads.SuspiciousThreads": 180,
     "windows.suspicious_threads.SuspiciousThreads":         180,
     # EDR-bypass detection (added by capstone dep)
-    "windows.malware.direct_system_calls.DirectSystemCalls":   120,
-    "windows.malware.indirect_system_calls.IndirectSystemCalls": 120,
+    "windows.malware.direct_system_calls.DirectSystemCalls":   300,
+    "windows.malware.indirect_system_calls.IndirectSystemCalls": 300,
     # Kernel / rootkit
     "windows.modules.Modules":              60,
     "windows.ssdt.SSDT":                    60,
