@@ -55,38 +55,6 @@ fdash_log() {
 # Repo synchronisation
 # =============================================================================
 
-# Sync /opt/stack/forensicnova to the latest origin/main commit.
-#
-# Why this exists:
-#   DevStack does not re-pull plugin repositories on subsequent stack.sh
-#   runs when the plugin directory already exists. The default RECLONE
-#   flag (False) means stack.sh trusts whatever code is on disk under
-#   /opt/stack/<plugin>. That breaks our iteration loop: we push to
-#   GitHub from /home/davide/projects/forensicnova, then re-stack, then
-#   discover the deployed code is stale because /opt/stack/forensicnova
-#   was last cloned days ago.
-#
-# What this function does:
-#   At pre-install time, if the deploy directory is a git checkout,
-#   fetch origin/main and hard-reset to it. The deployed code is now
-#   guaranteed to match the latest pushed commit.
-#
-# Safety:
-#   - Skipped on first stack (no .git directory yet — DevStack will clone
-#     fresh from local.conf's enable_plugin URL).
-#   - Hard reset is intentional: any uncommitted change in the deploy
-#     tree is overwritten. The whole point of the plugin model is that
-#     /opt/stack/forensicnova is a read-only mirror of origin/main; manual
-#     edits there are an anti-pattern and must not be preserved.
-#   - On fetch/reset failure (network down, GitHub rate-limit, etc.) the
-#     function logs a WARNING and continues with the on-disk code instead
-#     of aborting the stack. Better stale-but-running than no-stack-at-all.
-#
-# Monorepo note:
-#   This function syncs the WHOLE repo. Since the Horizon dashboard now
-#   lives in the same repo (under forensicnova_dashboard/), a single
-#   git reset --hard re-aligns both backend AND dashboard code in one
-#   shot. No additional sync logic is needed for the dashboard.
 forensicnova_sync_repo() {
     if [[ ! -d "${FORENSICNOVA_DIR}/.git" ]]; then
         forensicnova_log "pre-install" \
@@ -134,9 +102,6 @@ forensicnova_ensure_dirs() {
     done
 }
 
-# Generate the Flask session signing key if not already present.
-# IDEMPOTENT: preserving the existing key across ./unstack.sh + ./stack.sh
-# keeps active dashboard sessions valid.
 forensicnova_ensure_secret_key() {
     local secret_key_file="${FORENSICNOVA_WORK_DIR}/secret_key"
     if [[ -f "$secret_key_file" ]]; then
@@ -151,12 +116,6 @@ forensicnova_ensure_secret_key() {
     sudo chmod 600 "$secret_key_file"
 }
 
-# Keystone identity artifacts: role, project, user, role assignments.
-# Also grants dfir-tester the 'admin' role on EVERY existing project
-# so the forensic analyst can read metadata of any tenant's VMs.
-#
-# This admin-on-all-projects grant is a pragmatic prototype workaround;
-# production deployments may want to tighten the grant.
 forensicnova_ensure_identity() {
     forensicnova_log "extra" "ensuring Keystone identity artifacts"
 
@@ -174,7 +133,6 @@ forensicnova_ensure_identity() {
     get_or_add_user_project_role "admin" \
         "$FORENSICNOVA_DFIR_USER" "$FORENSICNOVA_PROJECT"
 
-    # Cross-tenant admin role: grant 'admin' on every existing project.
     forensicnova_log "extra" \
         "granting 'admin' role on all projects to ${FORENSICNOVA_DFIR_USER}"
     local project
@@ -191,12 +149,6 @@ forensicnova_ensure_identity() {
     done
 }
 
-# Ensure both the main forensic container AND the segments container that
-# SLO uploads need. The segments container hosts dump segments
-# named '<dump_object_name>/seg-NNNN'; Swift treats it as an ordinary
-# container, but by convention we keep it separate from the main one to
-# clearly distinguish forensic artefacts (manifests, JSON reports, simple
-# uploads) from raw segments that have no standalone meaning.
 forensicnova_ensure_container() {
     local main_container="$FORENSICNOVA_SWIFT_CONTAINER"
     local segments_container="${FORENSICNOVA_SWIFT_CONTAINER}_segments"
@@ -216,23 +168,6 @@ forensicnova_ensure_container() {
     )
 }
 
-# Register ForensicNova as a first-class OpenStack service
-# in the Keystone catalog.
-#
-# Creates one service entry of type ${FORENSICNOVA_SERVICE_TYPE} and three
-# endpoints (public / internal / admin), all pointing at the Flask service
-# on http://${HOST_IP}:${FORENSICNOVA_PORT}. This is what lets the Horizon
-# dashboard discovers the API through the catalog rather than
-# hard-coding host:port.
-#
-# Idempotency:
-#   - the service entry is created only if 'openstack service show
-#     <type>' fails (no existing service of that type);
-#   - each endpoint is created only if 'openstack endpoint list' shows no
-#     existing endpoint of that interface for our service, so a re-run on
-#     a live cloud does not produce duplicates.
-#   Note: a full ./unstack.sh + ./stack.sh rebuilds the Keystone DB from
-#   scratch, so on a normal restack this function always starts clean.
 forensicnova_register_dfir_service() {
     local public_url="http://${HOST_IP}:${FORENSICNOVA_PORT}"
     local region="${REGION_NAME:-RegionOne}"
@@ -240,10 +175,6 @@ forensicnova_register_dfir_service() {
     forensicnova_log "extra" \
         "registering '${FORENSICNOVA_SERVICE_NAME}' service in Keystone catalog (${public_url}, region ${region})"
 
-    # Idempotent service creation: 'openstack service create' has no
-    # --or-show flag (unlike project/user/role create), so we must
-    # check-then-create explicitly. 'openstack service show <type>'
-    # exits 0 if a service of that type already exists, 1 otherwise.
     if openstack service show "$FORENSICNOVA_SERVICE_TYPE" >/dev/null 2>&1; then
         forensicnova_log "extra" \
             "service '${FORENSICNOVA_SERVICE_NAME}' already present — skipping create"
@@ -286,9 +217,6 @@ forensicnova_register_dfir_service() {
     forensicnova_log "extra" "service catalog registration complete"
 }
 
-# Remove the ForensicNova service + endpoints from the
-# Keystone catalog. Best-effort: during ./unstack.sh Keystone may already
-# be shutting down, so every failure is logged as a warning and ignored.
 forensicnova_unregister_dfir_service() {
     forensicnova_log "unstack" \
         "removing '${FORENSICNOVA_SERVICE_NAME}' from Keystone catalog (best-effort)"
@@ -538,15 +466,7 @@ cleanup_forensicnova() {
 # =============================================================================
 # Dashboard — Idempotent building blocks
 # =============================================================================
-#
-# The dashboard is a Horizon (Django) plugin. It is installed into Horizon's
-# venv (NOT the backend venv) via `pip install -e`, and it registers its
-# panels by dropping _9NNN_*.py files into Horizon's `local/enabled/` dir.
-# Horizon auto-discovers them at Django startup.
 
-# Probe for Horizon's Python interpreter / pip. DevStack-deployed Horizon
-# typically uses /opt/stack/data/venv (the shared services venv); we fall
-# back to /usr/local/bin and /usr/bin only as a safety net.
 FORENSICNOVA_DASHBOARD_PIP=""
 
 fdash_locate_horizon_pip() {
@@ -567,12 +487,6 @@ fdash_locate_horizon_pip() {
     return 1
 }
 
-# `pip install -e` operates on the directory containing setup.cfg/setup.py.
-# In the monorepo this is FORENSICNOVA_DIR (== FORENSICNOVA_DASHBOARD_DIR).
-# The setup.cfg [options.packages.find] include=forensicnova_dashboard*
-# rule ensures only the dashboard package is installed, NOT the backend's
-# app/ package — which lives in the same directory but belongs to a
-# separate venv and must stay out of Horizon's Python path.
 fdash_install_package() {
     fdash_log "install" "installing forensicnova-dashboard (editable) into Horizon's venv"
     fdash_locate_horizon_pip || return 1
@@ -586,9 +500,6 @@ fdash_uninstall_package() {
     sudo "$FORENSICNOVA_DASHBOARD_PIP" uninstall -y forensicnova-dashboard 2>/dev/null || true
 }
 
-# Drop the _9NNN_*.py registration files into Horizon's local/enabled/
-# directory. Horizon scans this dir at Django startup and imports every
-# matching file: each one registers a Dashboard, PanelGroup or Panel.
 fdash_install_enabled_files() {
     fdash_log "post-config" "copying enabled/ files to ${HORIZON_LOCAL_ENABLED_DIR}"
     sudo mkdir -p "$HORIZON_LOCAL_ENABLED_DIR"
@@ -603,11 +514,6 @@ fdash_install_enabled_files() {
 
 fdash_remove_enabled_files() {
     fdash_log "clean" "removing forensicnova-dashboard enabled/ files"
-    # Symmetric to fdash_install_enabled_files: glob the repo's
-    # enabled/ directory and remove the corresponding installed
-    # copies from HORIZON_LOCAL_ENABLED_DIR. Auto-maintained: every
-    # new _9NNN_*.py we add (or remove) in the repo is picked up
-    # without having to keep two lists in sync.
     local f
     for f in "$FORENSICNOVA_DASHBOARD_DIR"/forensicnova_dashboard/enabled/_*.py; do
         [[ -f "$f" ]] || continue
@@ -616,11 +522,6 @@ fdash_remove_enabled_files() {
     done
 }
 
-# Horizon serves static assets (CSS, JS) from a Django collectstatic dir.
-# Adding a new dashboard introduces new templates (and possibly static
-# files); we run collectstatic + compress so Apache picks them up.
-# Failure here is non-fatal: Horizon still runs, only the new dashboard's
-# assets might 404 until the next successful stack.
 fdash_collectstatic_and_compress() {
     fdash_log "post-config" "running collectstatic + compress for Horizon"
     local manage_py="${DEST}/horizon/manage.py"
@@ -642,10 +543,6 @@ fdash_collectstatic_and_compress() {
         || fdash_log "post-config" "compress returned non-zero (ignored)"
 }
 
-# Horizon runs inside Apache (mod_wsgi). The DevStack systemd unit
-# `devstack@horizon.service` is cosmetic on modern DevStack: the actual
-# process is Apache. We try systemctl restart first (works on some
-# layouts), fall back to `service apache2 restart`.
 fdash_restart_horizon() {
     local unit="devstack@horizon.service"
     fdash_log "extra" "restarting ${unit} (or apache2)"
@@ -677,9 +574,6 @@ init_forensicnova_dashboard() {
 
 stop_forensicnova_dashboard() {
     fdash_log "unstack" "phase: unstack"
-    # Horizon is restarted by the main DevStack unstack flow; we just
-    # remove our enabled/ entries so that if a partial unstack happens,
-    # Horizon comes back clean of stale DFIR panels.
     fdash_remove_enabled_files
 }
 
@@ -692,12 +586,7 @@ cleanup_forensicnova_dashboard() {
 # =============================================================================
 # Dispatcher
 # =============================================================================
-#
-# Two independent service flags drive two independent lifecycles. Each
-# block is guarded by `is_service_enabled`, so the operator can disable
-# either side from local.conf with `disable_service`.
 
-# --- Backend dispatcher ---
 if is_service_enabled forensicnova; then
     if [[ "$1" == "stack" ]]; then
         case "$2" in
@@ -714,7 +603,6 @@ if is_service_enabled forensicnova; then
     fi
 fi
 
-# --- Dashboard dispatcher ---
 if is_service_enabled forensicnova-dashboard; then
     if [[ "$1" == "stack" ]]; then
         case "$2" in
@@ -733,21 +621,6 @@ fi
 # =============================================================================
 # Analyzer service (forensicnova-analyzer) — Volatility 3 + future MISP/YARA
 # =============================================================================
-#
-# Second Flask backend of the project. Source lives in forensicnova_analyzer/.
-# Same git repo, same enable_plugin, but:
-#   - dedicated venv: $FORENSICNOVA_ANALYZER_DIR/.venv-analyzer
-#   - systemd unit: devstack@forensicnova-analyzer.service
-#   - TCP port: $FORENSICNOVA_ANALYZER_PORT (default 5235)
-#   - Keystone service: $FORENSICNOVA_ANALYZER_SERVICE_NAME (dfir-analyzer)
-#
-# This scaffolding commit registers:
-#   - venv + base pip deps including Volatility 3 (pinned at 2.28.0)
-#   - systemd unit
-#   - config file from template
-#   - Keystone service catalog entry
-# JobManager, Swift client and Volatility wrapper logic will be added
-# in subsequent commits when api/v1.py starts hosting real routes.
 
 FORENSICNOVA_ANALYZER_SYSTEMD_UNIT="devstack@forensicnova-analyzer.service"
 FORENSICNOVA_ANALYZER_SYSTEMD_PATH="/etc/systemd/system/${FORENSICNOVA_ANALYZER_SYSTEMD_UNIT}"
@@ -770,12 +643,33 @@ fanalyzer_install_python_deps() {
     # Pinned Volatility 3 version: 2.28.0 is the last release before the
     # 2026-06-07 plugin removal/rename window. Pinning protects the
     # 50-day thesis timeline from upstream churn.
+    #
+    # Optional Vol3 dependencies (yara-python, capstone, pycryptodome) are
+    # required to unlock additional plugins beyond the base 91 of the bare
+    # install. With these three installed, Vol3 exposes ~106 plugins
+    # including credential dumpers (registry.hashdump, registry.lsadump,
+    # registry.cachedump), EDR-bypass detectors (direct_system_calls,
+    # indirect_system_calls), MFT scan (mftscan.MFTScan + ADS +
+    # ResidentData), and the YARA scanner (vadyarascan). Without them
+    # Vol3 silently hides the dependent plugins from `vol --help`.
+    #
+    #   yara-python   -> windows.vadyarascan.VadYaraScan,
+    #                    linux.vmayarascan.VmaYaraScan
+    #   capstone      -> windows.malware.direct_system_calls.*,
+    #                    windows.malware.indirect_system_calls.*,
+    #                    windows.mftscan.*
+    #   pycryptodome  -> windows.registry.hashdump.Hashdump,
+    #                    windows.registry.lsadump.Lsadump,
+    #                    windows.registry.cachedump.Cachedump
     "$venv_pip" install --quiet --disable-pip-version-check \
         Flask \
         keystonemiddleware \
         python-swiftclient \
         python-keystoneclient \
         requests \
+        yara-python \
+        capstone \
+        pycryptodome \
         "volatility3==2.28.0"
 }
 
@@ -958,10 +852,6 @@ install_forensicnova_analyzer() {
 
 configure_forensicnova_analyzer() {
     fanalyzer_log "post-config" "phase: post-config"
-    # Defense in depth: the same check exists in configure_forensicnova,
-    # which normally runs first in the stack lifecycle. We re-check here
-    # so the analyzer fails clearly even if the acquisition backend is
-    # disabled in local.conf.
     if [[ -z "$FORENSICNOVA_DFIR_PASSWORD" ]]; then
         fanalyzer_log "post-config" \
             "ERROR: FORENSICNOVA_DFIR_PASSWORD is unset. Set it in local.conf."

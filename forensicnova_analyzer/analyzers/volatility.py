@@ -1,10 +1,39 @@
 """ForensicNova — Volatility 3 subprocess wrapper.
 
-Stage E3.1 introduces the low-level primitive `run_plugin()` that
-invokes the `vol` CLI as a subprocess, parses its JSON output, and
-returns a normalised result dict. The next commit (E3.2) layers
-VolatilityAnalyzer on top of it to implement the fast/full/custom
-preset dispatch.
+This module wraps the Vol3 `vol` CLI as a subprocess so the analyzer
+service can run memory-forensics plugins without importing them into
+the Flask process address space (plugins occasionally crash with
+sys.exit; the subprocess gives hard process-level isolation).
+
+Public entry points:
+
+  run_plugin(dump_path, plugin_name, cache_dir, timeout, extra_args)
+      Low-level primitive. Invokes one Vol3 plugin, parses --renderer
+      json output, returns a normalised result dict. Never raises on
+      Vol3 failures (timeout, non-zero exit, JSON parse errors): all
+      conditions are captured in the result's `status` field so the
+      caller can decide whether to abort, retry, or continue.
+
+  VolatilityAnalyzer.run(dump_path, expected_md5, expected_sha1,
+                          summary, preset, plugins, ...)
+      High-level orchestration. Performs:
+        1. Triple-witness hashing (MD5+SHA1 streaming, fail-fast if
+           the dump does not match the chain-of-custody report).
+        2. OS resolution from Glance metadata.
+        3. Preset plugin list selection (fast/full/custom).
+        4. Serial run_plugin() loop with per-plugin timeouts.
+        5. Aggregation into a single analysis JSON.
+
+Output schema (run_plugin):
+
+      plugin            (str)        FQN, e.g. "windows.info.Info"
+      status            (str)        "ok" | "failed" | "timeout" | "parse_error"
+      returncode        (int|None)   None on timeout
+      duration_seconds  (float)      wall-clock time
+      rows              (list[dict]) parsed JSON output, [] on failure
+      row_count         (int)        len(rows)
+      stderr_tail       (str)        last ~50 stderr lines (always useful)
+      error_message     (str|None)   populated on non-"ok" status
 
 Why subprocess and not Python API:
 
@@ -38,20 +67,14 @@ Environment isolation:
     blocking the worker thread forever. On timeout the subprocess is
     SIGTERM'd, then SIGKILL'd if it doesn't exit.
 
-Output schema:
+Scope (this revision):
 
-  Every invocation returns a dict with the same top-level keys, so
-  the aggregator (VolatilityAnalyzer) can serialise an array of
-  results uniformly even when some failed.
-
-      plugin            (str)        FQN, e.g. "windows.info.Info"
-      status            (str)        "ok" | "failed" | "timeout" | "parse_error"
-      returncode        (int|None)   None on timeout
-      duration_seconds  (float)      wall-clock time
-      rows              (list[dict]) parsed JSON output, [] on failure
-      row_count         (int)        len(rows)
-      stderr_tail       (str)        last ~50 stderr lines (always useful)
-      error_message     (str|None)   populated on non-"ok" status
+  Windows-only. Linux acquisitions are detected via the OS hint and
+  rejected fail-fast with a clear error message — Vol3 needs ISF
+  (Intermediate Symbol Format) files for the exact target kernel, and
+  setting up the ISF infrastructure (mirroring isf-server, generating
+  symbols with dwarf2json) is out of scope of the thesis demo. The
+  architecture remains OS-agnostic; Linux is a future-work extension.
 """
 from __future__ import annotations
 
@@ -309,10 +332,6 @@ _HASH_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 #     - What did they launch? (cmdline)  — exposes credential dumpers
 #     - Who's calling out?    (netscan)  — exposes C2 callbacks
 #     - What system is this?  (info)     — kernel build, banner, DTB
-#
-# E4 will introduce PRESET_FULL_* covering injection detection
-# (malware.malfind), driver/rootkit (modules, modscan), and credential
-# artifacts (registry.hashdump).
 
 PRESET_FAST_WINDOWS = [
     "windows.info.Info",
@@ -322,33 +341,52 @@ PRESET_FAST_WINDOWS = [
     "windows.netscan.NetScan",
 ]
 
-PRESET_FAST_LINUX = [
-    # Placeholder — Linux is out of scope for the thesis demo, but
-    # having a non-empty map prevents accidental fallback to windows
-    # plugins when a future Linux acquisition lands here.
-    "linux.pslist.PsList",
-    "linux.psaux.PsAux",
-    "linux.lsmod.Lsmod",
-    "linux.bash.Bash",
-]
+# Linux is out of scope of the thesis demo (no ISF symbol pipeline).
+# Empty lists make _preset_plugin_list raise a clear error if a Linux
+# dump ever reaches this code path, rather than silently invoking
+# zero plugins and returning an empty result.
+PRESET_FAST_LINUX: list[str] = []
 
-# "full" preset — 13 plugins covering all six SANS macro-areas of
-# Windows memory forensics:
+# "full" preset — 17 plugins covering the six SANS macro-areas of
+# Windows memory forensics, with extra credential-theft and
+# EDR-bypass coverage enabled by the optional Vol3 deps:
 #
 #   1. Identify Rogue Processes   pslist, psscan, pstree
 #   2. Analyze Process Objects    cmdline, handles, dlllist
 #   3. Review Network Artifacts   netscan
 #   4. Look for Code Injection    malware.malfind, malware.ldrmodules,
-#                                 malware.hollowprocesses
+#                                 malware.hollowprocesses,
+#                                 malware.direct_system_calls,
+#                                 malware.indirect_system_calls
 #   5. Audit Drivers/Rootkit      modules, ssdt
-#   6. Metadata                   info
+#   6. Credentials                registry.hashdump, registry.lsadump
+#   7. Metadata                   info
 #
-# psscan complements pslist by scanning memory for orphaned EPROCESS
-# blocks (DKOM-hidden processes). malfind detects RWX regions not
-# backed by a file on disk — the canonical signature for Meterpreter
-# shellcode injection. hollowprocesses detects process hollowing
-# (REMCOS, HijackLoader, generic T1055.012). SSDT detects kernel-level
-# hooks placed by rootkits to intercept system calls.
+# Notes on the four additions vs the original 13-plugin set:
+#
+#   - registry.hashdump      Extracts NTLM hashes from the SAM hive.
+#                            Canonical artifact of credential theft;
+#                            detects Mimikatz `sekurlsa::logonpasswords`
+#                            and similar techniques.
+#   - registry.lsadump       Extracts LSA secrets (service account
+#                            passwords, DPAPI master keys, cached
+#                            certificates).
+#   - malware.direct_system_calls
+#                            Detects modern EDR-bypass techniques:
+#                            shellcode that issues syscalls directly
+#                            via int 0x2e / syscall instruction,
+#                            bypassing userland ntdll hooks.
+#   - malware.indirect_system_calls
+#                            Detects the newer indirect-syscall variant
+#                            (Hell's Gate, FreshyCalls, SysWhispers3)
+#                            where the shellcode jumps into ntdll at
+#                            the syscall stub instead of in-lining the
+#                            instruction. Used by Cobalt Strike, Brute
+#                            Ratel, modern Meterpreter loaders.
+#
+# Expected runtime on a 4 GiB Windows Server 2022 dump: ~4-5 minutes
+# (up from ~2.5 min for the 13-plugin set). Acceptable for a deep-dive
+# preset that is run after fast triage flags something suspicious.
 
 PRESET_FULL_WINDOWS = [
     "windows.info.Info",
@@ -362,37 +400,58 @@ PRESET_FULL_WINDOWS = [
     "windows.malware.malfind.Malfind",
     "windows.malware.ldrmodules.LdrModules",
     "windows.malware.hollowprocesses.HollowProcesses",
+    "windows.malware.direct_system_calls.DirectSystemCalls",
+    "windows.malware.indirect_system_calls.IndirectSystemCalls",
     "windows.modules.Modules",
     "windows.ssdt.SSDT",
+    "windows.registry.hashdump.Hashdump",
+    "windows.registry.lsadump.Lsadump",
 ]
 
-PRESET_FULL_LINUX = [
-    # Placeholder, see PRESET_FAST_LINUX comment.
-    "linux.pslist.PsList",
-    "linux.psaux.PsAux",
-    "linux.lsmod.Lsmod",
-    "linux.bash.Bash",
-    "linux.malfind.Malfind",
-    "linux.check_modules.Check_modules",
-    "linux.check_syscall.Check_syscall",
-    "linux.check_idt.Check_idt",
-]
+# Linux is out of scope of the thesis demo (see PRESET_FAST_LINUX).
+PRESET_FULL_LINUX: list[str] = []
 
 # Custom preset whitelist — plugins that can be requested via
 # preset="custom". The whitelist excludes plugins that produce
 # non-JSON-friendly output (binary file dumps, megabytes of raw
 # strings) which would inflate the analysis JSON beyond practical
-# size limits. Adding a plugin here is a deliberate trust decision:
-# the runner will accept it from API callers.
+# size limits, and excludes deprecated FQN aliases.
 #
-# Excluded from the namespace seen on the deployed Vol3 2.28.0:
-#   windows.dumpfiles.DumpFiles  — writes PE/file artifacts to disk
-#   windows.pedump.PEDump        — writes PE files to disk
-#   windows.strings.Strings      — emits a string per byte run (huge)
+# Plugins added in this revision (enabled by yara-python / capstone /
+# pycryptodome optional Vol3 deps):
 #
-# All other 88 plugins are accepted. The list below is the result of
-# `vol --help | grep ^\s+windows\.` filtered against the exclusion
-# set, snapshot taken on 2026-05-24 against Vol3 2.28.0.
+#   - windows.vadyarascan.VadYaraScan          (yara-python)
+#       Pattern-based detection across all process VAD memory maps.
+#       Complementary to behaviour-based malfind. Requires runtime
+#       argument --yara-file=<path> with rule definitions; the analyzer
+#       does not yet expose UI for rule selection, so this plugin
+#       appears in the whitelist as future-work hook (e.g. for MISP
+#       integration that publishes YARA rules).
+#   - windows.registry.hashdump.Hashdump       (pycryptodome)
+#       NTLM hashes from SAM hive.
+#   - windows.registry.lsadump.Lsadump         (pycryptodome)
+#       LSA secrets.
+#   - windows.registry.cachedump.Cachedump     (pycryptodome)
+#       Domain-cached credentials (MSCASH).
+#   - windows.mftscan.MFTScan                  (capstone)
+#       NTFS Master File Table reconstruction from RAM — yields file
+#       names, MACE timestamps, and recently-deleted file metadata.
+#   - windows.mftscan.ADS                      (capstone)
+#       Alternate Data Streams enumeration.
+#   - windows.mftscan.ResidentData             (capstone)
+#       Small files that live entirely inside MFT records.
+#   - windows.malware.direct_system_calls.DirectSystemCalls   (capstone)
+#       EDR-bypass detection.
+#   - windows.malware.indirect_system_calls.IndirectSystemCalls (capstone)
+#       Advanced EDR-bypass detection.
+#
+# Deprecated FQN aliases (windows.hashdump, windows.lsadump,
+# windows.cachedump, windows.direct_system_calls,
+# windows.indirect_system_calls) are intentionally NOT whitelisted:
+# they shadow the canonical namespace plugins and would lead to two
+# entries for the same logical capability in the UI selector.
+# linux.vmayarascan.VmaYaraScan is excluded because Linux is out of
+# scope.
 
 PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.amcache.Amcache",
@@ -423,8 +482,10 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.kpcrs.KPCRs",
     "windows.ldrmodules.LdrModules",
     "windows.malfind.Malfind",
+    "windows.malware.direct_system_calls.DirectSystemCalls",
     "windows.malware.drivermodule.DriverModule",
     "windows.malware.hollowprocesses.HollowProcesses",
+    "windows.malware.indirect_system_calls.IndirectSystemCalls",
     "windows.malware.ldrmodules.LdrModules",
     "windows.malware.malfind.Malfind",
     "windows.malware.pebmasquerade.PebMasquerade",
@@ -436,6 +497,9 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.malware.unhooked_system_calls.UnhookedSystemCalls",
     "windows.mbrscan.MBRScan",
     "windows.memmap.Memmap",
+    "windows.mftscan.ADS",
+    "windows.mftscan.MFTScan",
+    "windows.mftscan.ResidentData",
     "windows.modscan.ModScan",
     "windows.modules.Modules",
     "windows.mutantscan.MutantScan",
@@ -451,10 +515,13 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.pstree.PsTree",
     "windows.psxview.PsXView",
     "windows.registry.amcache.Amcache",
+    "windows.registry.cachedump.Cachedump",
     "windows.registry.certificates.Certificates",
     "windows.registry.getcellroutine.GetCellRoutine",
+    "windows.registry.hashdump.Hashdump",
     "windows.registry.hivelist.HiveList",
     "windows.registry.hivescan.HiveScan",
+    "windows.registry.lsadump.Lsadump",
     "windows.registry.printkey.PrintKey",
     "windows.registry.scheduled_tasks.ScheduledTasks",
     "windows.registry.userassist.UserAssist",
@@ -479,25 +546,20 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.vadinfo.VadInfo",
     "windows.vadregexscan.VadRegExScan",
     "windows.vadwalk.VadWalk",
+    "windows.vadyarascan.VadYaraScan",
     "windows.verinfo.VerInfo",
     "windows.virtmap.VirtMap",
     "windows.windows.Windows",
     "windows.windowstations.WindowStations",
 })
 
-PLUGIN_WHITELIST_LINUX = frozenset({
-    # Placeholder. Will be populated when a Linux acquisition lands.
-    "linux.pslist.PsList",
-    "linux.psaux.PsAux",
-    "linux.lsmod.Lsmod",
-    "linux.bash.Bash",
-    "linux.malfind.Malfind",
-    "linux.check_modules.Check_modules",
-    "linux.check_syscall.Check_syscall",
-    "linux.check_idt.Check_idt",
-    "linux.ip.Link",
-    "linux.boottime.Boottime",
-})
+# Linux is out of scope of the thesis demo (see PRESET_FAST_LINUX).
+# The architecture remains OS-agnostic via Vol3, which natively
+# supports Linux memory forensics; activating support is a matter of
+# (a) populating this whitelist, (b) integrating an ISF symbol
+# distribution mechanism, (c) running smoke tests on at least one
+# real Linux distro dump. Future work.
+PLUGIN_WHITELIST_LINUX: frozenset[str] = frozenset()
 
 # Per-plugin timeout overrides (seconds). Plugins not listed here use
 # the caller's per_plugin_timeout argument (default 300). The values
@@ -512,6 +574,10 @@ PLUGIN_WHITELIST_LINUX = frozenset({
 #     (linear scan of all RAM with pattern matching)
 #   - Registry plugins: 60s (hive parsing is fast once mapped)
 #   - Kernel/driver scanners: 180s (heuristic detection)
+#   - Credential dumpers: 60s (registry hive walk + decrypt)
+#   - Syscall analyzers: 120s (ntdll disassembly via capstone)
+#   - MFT family: 180s (linear scan + record parsing)
+#   - YARA scanner: 600s (rules-dependent, can be very slow)
 
 PLUGIN_TIMEOUTS = {
     # Fast metadata
@@ -552,6 +618,9 @@ PLUGIN_TIMEOUTS = {
     "windows.processghosting.ProcessGhosting":         180,
     "windows.malware.suspicious_threads.SuspiciousThreads": 180,
     "windows.suspicious_threads.SuspiciousThreads":         180,
+    # EDR-bypass detection (added by capstone dep)
+    "windows.malware.direct_system_calls.DirectSystemCalls":   120,
+    "windows.malware.indirect_system_calls.IndirectSystemCalls": 120,
     # Kernel / rootkit
     "windows.modules.Modules":              60,
     "windows.ssdt.SSDT":                    60,
@@ -561,7 +630,34 @@ PLUGIN_TIMEOUTS = {
     "windows.registry.hivelist.HiveList":   60,
     "windows.registry.printkey.PrintKey":   90,
     "windows.amcache.Amcache":              90,
+    # Credential dumpers (added by pycryptodome dep)
+    "windows.registry.hashdump.Hashdump":   60,
+    "windows.registry.lsadump.Lsadump":     60,
+    "windows.registry.cachedump.Cachedump": 60,
+    # MFT family (added by capstone dep)
+    "windows.mftscan.MFTScan":              180,
+    "windows.mftscan.ADS":                  120,
+    "windows.mftscan.ResidentData":         120,
+    # YARA scanner (added by yara-python dep)
+    # Generous timeout: scan time depends on the rules file size and
+    # the number of processes in the dump. 600s allows for substantial
+    # rule packs (hundreds of rules) on a 4 GiB dump.
+    "windows.vadyarascan.VadYaraScan":      600,
 }
+
+
+# Custom exception for clear Linux-out-of-scope signalling. Caught by
+# the runner (jobs_runner._dispatch_analyzer) which fails the job with
+# this message; the user sees a precise error in the watch page.
+class LinuxNotSupportedError(ValueError):
+    """Raised when an analysis is requested on a Linux dump.
+
+    Linux is out of scope of this thesis revision: Vol3 needs ISF
+    (Intermediate Symbol Format) files for the exact target kernel,
+    and setting up the ISF infrastructure is future work. The
+    architecture itself is OS-agnostic and can be extended later
+    without redesigning the pipeline.
+    """
 
 
 def _preset_plugin_list(
@@ -577,30 +673,36 @@ def _preset_plugin_list(
     refuse output-binary plugins (file dumps) and prevent typos from
     silently invoking nothing.
 
+    :raises LinuxNotSupportedError: if os_hint=="linux" (out of scope).
     :raises ValueError: if the combination is not supported, or if
         a custom plugin is missing/empty/not whitelisted.
     """
+    if os_hint == "linux":
+        raise LinuxNotSupportedError(
+            "Linux acquisitions are out of scope in this release. "
+            "Vol3 supports Linux natively but requires ISF symbol files "
+            "for the exact target kernel; setting up the ISF distribution "
+            "infrastructure is future work."
+        )
+
     if preset == "fast":
-        return list(PRESET_FAST_LINUX if os_hint == "linux"
-                    else PRESET_FAST_WINDOWS)
+        return list(PRESET_FAST_WINDOWS)
 
     if preset == "full":
-        return list(PRESET_FULL_LINUX if os_hint == "linux"
-                    else PRESET_FULL_WINDOWS)
+        return list(PRESET_FULL_WINDOWS)
 
     if preset == "custom":
         if not custom_plugins:
             raise ValueError(
                 "preset='custom' requires a non-empty 'plugins' list"
             )
-        whitelist = (PLUGIN_WHITELIST_LINUX if os_hint == "linux"
-                     else PLUGIN_WHITELIST_WINDOWS)
-        rejected = [p for p in custom_plugins if p not in whitelist]
+        rejected = [p for p in custom_plugins if p not in PLUGIN_WHITELIST_WINDOWS]
         if rejected:
             raise ValueError(
-                f"custom plugin(s) not in whitelist for os={os_hint}: "
-                f"{rejected}. Plugins producing binary file output "
-                f"(dumpfiles, pedump, strings) are excluded by design."
+                f"custom plugin(s) not in whitelist: {rejected}. "
+                f"Plugins producing binary file output (dumpfiles, "
+                f"pedump, strings) and deprecated FQN aliases are "
+                f"excluded by design."
             )
         # Preserve caller-supplied order (analyst may want a specific
         # sequence, e.g. info first then everything else).
@@ -657,7 +759,9 @@ class VolatilityAnalyzer:
          result does not match the report, hashes_match_report becomes
          False — the runner translates that into fail_job. Vol3 plugins
          are NOT invoked if hashing fails the comparison (fail-fast).
-      2. OS resolution (from acquisition metadata).
+      2. OS resolution (from acquisition metadata). Linux dumps are
+         rejected immediately with LinuxNotSupportedError; the analyzer
+         is Windows-only in this revision.
       3. Preset plugin list selection.
       4. Serial run_plugin() loop. Per-plugin failures (timeout,
          non-zero returncode, JSON parse errors) are recorded in the
@@ -666,10 +770,10 @@ class VolatilityAnalyzer:
 
     Output schema (returned by run()):
       analyzer              "volatility"
-      analyzer_version      "0.1.0"
+      analyzer_version      "0.3.0"
       vol3_version          (from package constants, e.g. "2.28.0")
       preset                "fast" | "full" | "custom"
-      os_hint               "windows" | "linux"
+      os_hint               "windows"  (Linux is rejected before reaching here)
       dump_path             absolute path read
       dump_size_bytes       bytes streamed
       dump_md5              hex MD5 computed during step 1
@@ -684,15 +788,17 @@ class VolatilityAnalyzer:
       summary_counts        dict with ok/failed/timeout/parse_error counts
 
     Failure policy:
-      Same as NoOpAnalyzer — does NOT raise on hash mismatch. The
-      runner inspects hashes_match_report and decides. Plugin-level
-      failures are degradation, not failure: they appear in the
+      Does NOT raise on hash mismatch — returns the result with
+      hashes_match_report=False; runner converts that into fail_job.
+      Does NOT raise on per-plugin failures — they appear in the
       result with status != "ok" and the job is still considered
       completed (so the operator can see which plugins succeeded).
+      Linux dumps DO raise LinuxNotSupportedError (caller's job to
+      surface as fail_job — see jobs_runner._dispatch_analyzer).
     """
 
     name = "volatility"
-    version = "0.2.0"
+    version = "0.3.0"
 
     SUPPORTED_PRESETS = frozenset({"fast", "full", "custom"})
 
@@ -721,13 +827,14 @@ class VolatilityAnalyzer:
         :param expected_sha1:      SHA1 from acquisition report (triple-witness)
         :param summary:            full summary from swift.summarize_acquisition,
                                    used for OS resolution
-        :param preset:             "fast" (E3), "full"/"custom" (E4)
+        :param preset:             "fast" | "full" | "custom"
         :param plugins:            explicit plugin FQN list — only honoured
-                                   when preset=="custom" (E4); ignored otherwise
+                                   when preset=="custom"; ignored otherwise
         :param per_plugin_timeout: passed to each run_plugin() call
 
         :returns: dict per the schema in the class docstring.
         :raises ValueError: if preset is not in SUPPORTED_PRESETS.
+        :raises LinuxNotSupportedError: if the dump's OS hint is linux.
         :raises FileNotFoundError: if dump_path does not exist.
         """
         if preset not in self.SUPPORTED_PRESETS:
@@ -813,9 +920,20 @@ class VolatilityAnalyzer:
                                          "parse_error": 0, "skipped_hash_fail": 0},
             }
 
-        # ----- STEP 2: OS resolution -----
+        # ----- STEP 2: OS resolution + Linux fail-fast -----
         os_hint = _resolve_os(summary)
         log.info("[volatility] OS hint resolved: %s", os_hint)
+
+        if os_hint == "linux":
+            # Reject before any subprocess fork. The runner converts
+            # this into fail_job with the message shown to the user
+            # via the dashboard watch page.
+            raise LinuxNotSupportedError(
+                "Linux acquisitions are out of scope in this release "
+                "(Glance os_distro suggests Linux). The architecture is "
+                "Vol3-based and OS-agnostic; Linux activation is future "
+                "work pending ISF symbol distribution setup."
+            )
 
         # ----- STEP 3: preset plugin list -----
         plugin_list = _preset_plugin_list(

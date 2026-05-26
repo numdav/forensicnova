@@ -2,7 +2,14 @@
 forensicnova_analyzer/api/v1.py — REST endpoints (v1).
 
 Stage E2.2 introduced two read-only endpoints for acquisition listing.
-Stage E2.5 (this revision) adds the async pipeline endpoints:
+Stage E2.5 added the async pipeline endpoints. This revision removes
+the no-op analyzer from the public API surface: the NoOpAnalyzer class
+remains in the codebase (forensicnova_analyzer/analyzers/noop.py) as a
+reference implementation of the analyzer protocol — useful when a
+future analyzer is added (e.g. MispEnricher) and a known-good baseline
+for the coherence-check pipeline is helpful. It is simply no longer
+exposed as a selectable choice in the UI or as a callable analyzer
+name via POST /api/v1/analyses.
 
 Read-only (E2.2):
 
@@ -12,14 +19,14 @@ Read-only (E2.2):
   GET /api/v1/acquisitions/<acquisition_id>
       Full acquisition report + summary.
 
-Async analysis pipeline (E2.5):
+Async analysis pipeline:
 
   POST /api/v1/analyses/<acquisition_id>
       Trigger an async analysis. Body JSON:
-          {"analyzer": "noop"|"volatility",
-           "preset":   "fast"|"full"|"custom"  (optional),
-           "plugins":  ["windows.malfind", ...] (optional, custom only),
-           "operator": "<name>" (optional, defaults to 'anonymous')}
+          {"analyzer": "volatility",
+           "preset":   "fast"|"full"|"custom"  (required for volatility),
+           "plugins":  ["windows.malfind", ...] (required when preset=custom),
+           "operator": "<name>" (optional, defaults to Keystone X-User-Name)}
       Response: 202 Accepted, {"job_id": "...", "status": "pending"}
 
   GET /api/v1/jobs/<job_id>
@@ -27,6 +34,9 @@ Async analysis pipeline (E2.5):
 
   GET /api/v1/jobs
       List all analyzer jobs, most recent first.
+
+  GET /api/v1/plugins
+      Discover available analyzers, presets, plugin whitelist.
 
   GET /api/v1/analyses/<acquisition_id>
       List analyses already produced for a given acquisition_id.
@@ -37,9 +47,9 @@ Async analysis pipeline (E2.5):
   DELETE /api/v1/cache/<acquisition_id>
       Forcibly evict the cached dump for an acquisition. Idempotent.
 
-Authentication is intentionally OFF in this revision. The system runs
-on a single DevStack VM in development; keystonemiddleware will be
-activated together with the Horizon dashboard wiring in a later commit.
+All /api/v1/* endpoints require a Keystone-validated token (via
+keystonemiddleware) plus the forensic_analyst role. /health and
+/version on core_bp are exempt and remain unauthenticated.
 """
 from __future__ import annotations
 
@@ -58,16 +68,18 @@ from forensicnova_analyzer.jobs_runner import (
 
 log = logging.getLogger("forensicnova_analyzer.api.v1")
 
-# Whitelist of analyzers callable from the API. Adding a new analyzer
-# requires both registering it here and wiring its class in the
-# runner's _dispatch_analyzer (jobs_runner.py).
-_KNOWN_ANALYZERS = {"noop", "volatility"}
+# Whitelist of analyzers callable from the API. Currently only the
+# Volatility 3 analyzer is exposed; the NoOpAnalyzer remains in the
+# codebase as a reference but is intentionally not advertised, to
+# avoid presenting the user with a meaningless choice ("run an
+# analyzer that does no analysis"). Adding a new analyzer requires
+# both registering it here and wiring its class in the runner's
+# _dispatch_analyzer (jobs_runner.py).
+_KNOWN_ANALYZERS = {"volatility"}
 
-# Preset whitelist per analyzer. None means "no preset validation"
-# (e.g. noop ignores preset entirely). For volatility, only "fast" is
-# accepted in E3; E4 will extend with "full" and "custom".
+# Preset whitelist per analyzer. Volatility supports the three preset
+# tiers; custom requires an explicit plugins list.
 _SUPPORTED_PRESETS = {
-    "noop":       None,
     "volatility": {"fast", "full", "custom"},
 }
 
@@ -172,7 +184,7 @@ def list_acquisitions_endpoint():
 
 
 # ---------------------------------------------------------------------------
-# GET /api/v1/acquisitions/<acquisition_id> — single report + summary (E2.2)
+# GET /api/v1/acquisitions/<acquisition_id> — single report + summary
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/acquisitions/<acquisition_id>", methods=["GET"])
@@ -213,7 +225,7 @@ def get_acquisition_endpoint(acquisition_id: str):
 
 
 # ---------------------------------------------------------------------------
-# POST /api/v1/analyses/<acquisition_id> — trigger async analysis (E2.5)
+# POST /api/v1/analyses/<acquisition_id> — trigger async analysis
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/analyses/<acquisition_id>", methods=["POST"])
@@ -245,9 +257,7 @@ def trigger_analysis_endpoint(acquisition_id: str):
     preset = body.get("preset")
     plugins = body.get("plugins")
 
-    # Validate preset against the per-analyzer whitelist (E3: vol only
-    # supports "fast"; E4 will widen). None preset is always accepted
-    # — the runner picks a sensible default (e.g. "fast" for vol).
+    # Validate preset against the per-analyzer whitelist.
     supported = _SUPPORTED_PRESETS.get(analyzer_name)
     if preset is not None and supported is not None and preset not in supported:
         return jsonify({
@@ -260,23 +270,20 @@ def trigger_analysis_endpoint(acquisition_id: str):
 
     # Pre-validate custom plugin list at API level (immediate 400),
     # so the user gets feedback before a job is created and the
-    # asynchronous worker fails. We check against the UNION of OS
-    # whitelists because os_hint is resolved by the runner from the
-    # acquisition report metadata, not known here. The runner will
-    # still enforce the OS-specific whitelist when it actually runs.
+    # asynchronous worker fails. Linux is currently out of scope so
+    # we only check against the Windows whitelist.
     if analyzer_name == "volatility" and preset == "custom" and plugins:
         from forensicnova_analyzer.analyzers.volatility import (
-            PLUGIN_WHITELIST_WINDOWS, PLUGIN_WHITELIST_LINUX,
+            PLUGIN_WHITELIST_WINDOWS,
         )
-        combined_whitelist = PLUGIN_WHITELIST_WINDOWS | PLUGIN_WHITELIST_LINUX
-        rejected = [p for p in plugins if p not in combined_whitelist]
+        rejected = [p for p in plugins if p not in PLUGIN_WHITELIST_WINDOWS]
         if rejected:
             return jsonify({
                 "error":   "unknown_plugins",
                 "message": (
                     "Some plugins are not in the whitelist. Plugins producing "
-                    "binary file output (dumpfiles, pedump, strings) are "
-                    "excluded by design."
+                    "binary file output (dumpfiles, pedump, strings) and "
+                    "deprecated FQN aliases are excluded by design."
                 ),
                 "rejected_plugins": rejected,
                 "hint": (
@@ -353,7 +360,7 @@ def trigger_analysis_endpoint(acquisition_id: str):
 
 
 # ---------------------------------------------------------------------------
-# GET /api/v1/jobs/<job_id> — poll job status (E2.5)
+# GET /api/v1/jobs/<job_id> — poll job status
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/jobs/<job_id>", methods=["GET"])
@@ -370,7 +377,7 @@ def get_job_endpoint(job_id: str):
 
 
 # ---------------------------------------------------------------------------
-# GET /api/v1/jobs — list all analyzer jobs (E2.5)
+# GET /api/v1/jobs — list all analyzer jobs
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/jobs", methods=["GET"])
@@ -382,7 +389,7 @@ def list_jobs_endpoint():
 
 
 # ---------------------------------------------------------------------------
-# GET /api/v1/plugins — discover available presets + whitelist (E4)
+# GET /api/v1/plugins — discover available presets + whitelist
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/plugins", methods=["GET"])
@@ -395,16 +402,16 @@ def list_plugins_endpoint():
 
     Returns a structured catalogue:
         {
-          "analyzers":   ["noop", "volatility"],
+          "analyzers":   ["volatility"],
           "volatility": {
             "presets": {
-              "fast": [...],   # plugins included in fast preset (Windows)
-              "full": [...],   # plugins included in full preset (Windows)
+              "fast": {"windows": [...], "linux": []},
+              "full": {"windows": [...], "linux": []},
               "custom": "see plugin_whitelist"
             },
             "plugin_whitelist": {
-              "windows": [...],  # sorted FQN list, ~88 plugins
-              "linux":   [...],  # sorted FQN list, placeholder
+              "windows": [...],   # sorted FQN list
+              "linux":   []       # Linux out of scope in this release
             }
           }
         }
@@ -538,7 +545,7 @@ def get_analysis_by_id_endpoint(analysis_id: str):
 
 
 # ---------------------------------------------------------------------------
-# DELETE /api/v1/cache/<acquisition_id> — evict cached dump (E2.5)
+# DELETE /api/v1/cache/<acquisition_id> — evict cached dump
 # ---------------------------------------------------------------------------
 
 @api_v1_bp.route("/cache/<acquisition_id>", methods=["DELETE"])

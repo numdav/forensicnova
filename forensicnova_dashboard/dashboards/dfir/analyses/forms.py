@@ -1,8 +1,8 @@
 """Form for the New analysis workflow.
 
 Three coupled fields:
-    - analyzer  (noop | volatility)
-    - preset    (fast | full | custom) — only meaningful for volatility
+    - analyzer  (volatility — the only analyzer exposed in this release)
+    - preset    (fast | full | custom)
     - plugins   (multi-select) — only used when preset=custom
 
 The plugin multi-select is grouped by SANS macro-area of memory
@@ -115,13 +115,12 @@ class NewAnalysisForm(forms.Form):
 
     ANALYZER_CHOICES = (
         ("volatility", _("Volatility 3 (memory forensics)")),
-        ("noop",       _("No-op (coherence check only)")),
     )
 
     PRESET_CHOICES = (
         ("",       _("— pick a preset —")),
         ("fast",   _("fast — 5 plugins, ~17s on 4 GiB (triage)")),
-        ("full",   _("full — 13 plugins, ~3min on 4 GiB (deep dive)")),
+        ("full",   _("full — 17 plugins, ~4-5min on 4 GiB (deep dive)")),
         ("custom", _("custom — pick specific plugins below")),
     )
 
@@ -130,9 +129,8 @@ class NewAnalysisForm(forms.Form):
         choices=ANALYZER_CHOICES,
         initial="volatility",
         help_text=_(
-            "Pick which analyzer to run on the dump. Volatility 3 is "
-            "the memory forensics engine; the no-op analyzer only "
-            "validates the chain-of-custody hashes."
+            "Pick which analyzer to run on the dump. Volatility 3 is the "
+            "memory forensics engine driving every plugin in this system."
         ),
     )
 
@@ -142,8 +140,9 @@ class NewAnalysisForm(forms.Form):
         required=False,
         initial="fast",
         help_text=_(
-            "Only used for the Volatility analyzer. 'fast' is the "
-            "default triage; 'full' adds 8 deep-dive plugins; "
+            "'fast' is the default triage; "
+            "'full' adds 12 deep-dive plugins covering all SANS "
+            "macro-areas of memory forensics; "
             "'custom' lets you pick exactly which plugins to run."
         ),
     )
@@ -210,21 +209,8 @@ class NewAnalysisForm(forms.Form):
         preset = cleaned.get("preset") or None
         plugins = cleaned.get("plugins") or []
 
-        # noop: ignore preset/plugins; warn if user supplied them.
-        if analyzer == "noop":
-            if preset:
-                self.add_error(
-                    "preset",
-                    _("Preset is only used by the Volatility analyzer."),
-                )
-            if plugins:
-                self.add_error(
-                    "plugins",
-                    _("Plugins are only used by the Volatility analyzer."),
-                )
-            return cleaned
-
-        # volatility: require a preset.
+        # volatility: require a preset; custom requires plugins;
+        # non-custom presets ignore any supplied plugin list.
         if analyzer == "volatility":
             if not preset:
                 self.add_error(
