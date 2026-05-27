@@ -46,7 +46,19 @@ def _format_analyzer_preset(row) -> str:
 
 
 def _format_status(row) -> str:
-    """Status with a glyph for quick visual scanning."""
+    """Status with a glyph for quick visual scanning.
+
+    For in-flight jobs (pending/running) the per-plugin progress label
+    is appended after the status word, e.g.:
+        "▶ running — plugin 17/34: windows.malware.suspicious_threads.SuspiciousThreads"
+    The label originates from the analyzer's on_plugin_start callback
+    (volatility.py) and is persisted via JobManager.update_label, so
+    this surfaces the same fine-grained progress signal that the watch
+    page polls — just without the auto-refresh (operator hits F5).
+
+    For completed/failed jobs only the glyph + status is shown, since
+    the per-plugin label would be stale.
+    """
     status = row.get("status") or "unknown"
     glyph = {
         "pending":   "⋯",
@@ -54,7 +66,19 @@ def _format_status(row) -> str:
         "completed": "✓",
         "failed":    "✗",
     }.get(status, "?")
-    return f"{glyph} {status}"
+    base = f"{glyph} {status}"
+    # Append the current per-plugin label only while the job is moving.
+    # The label is the human-readable progress string ("Running plugin
+    # N/Total: <name>"); when present we trim its "Running plugin"
+    # prefix to keep the column compact.
+    if status in ("pending", "running"):
+        label = (row.get("label") or "").strip()
+        if label and label.lower().startswith("running plugin"):
+            # "Running plugin 17/34: ..." -> "plugin 17/34: ..."
+            label = label[len("Running "):]
+        if label and label.lower() != "running":
+            return f"{base} — {label}"
+    return base
 
 
 def _format_duration(row) -> str:
@@ -94,6 +118,35 @@ class ViewResultAction(tables.LinkAction):
 
     def get_link_url(self, datum):
         return reverse(self.url, args=(datum["analysis_id"],))
+
+
+class WatchProgressAction(tables.LinkAction):
+    """Open the live watch page for an in-flight (pending/running) job.
+
+    Complementary to ViewResultAction: ViewResult opens the completed
+    analysis detail; this one opens the polling watch page so the
+    operator can monitor per-plugin progress (e.g. "Running plugin
+    17/34: windows.malware.suspicious_threads.SuspiciousThreads")
+    without having to construct the URL by hand.
+
+    Visibility: only shown for jobs in 'pending' or 'running' state.
+    Once a job moves to 'completed' or 'failed' this action disappears
+    and ViewResultAction (or the row's row-error state) takes over.
+
+    The URL is the analyses:watch route (urls.py) which takes job_id.
+    job_id is exactly what get_object_id returns for this table, so
+    Horizon's action plumbing wires up automatically.
+    """
+    name = "watch_progress"
+    verbose_name = _("Watch")
+    url = "horizon:dfir:analyses:watch"
+    classes = ("btn-info",)
+
+    def allowed(self, request, datum=None):
+        return bool(datum and datum.get("status") in ("pending", "running"))
+
+    def get_link_url(self, datum):
+        return reverse(self.url, kwargs={"job_id": datum["job_id"]})
 
 
 class DownloadJsonAction(tables.LinkAction):
@@ -242,7 +295,13 @@ class AnalysesTable(tables.DataTable):
     class Meta:
         name = "analyses"
         verbose_name = _("Analyses")
+        # Action ordering: Watch comes first because it's the only
+        # action visible during a running job (the other two are
+        # gated on status=completed). Putting it first puts the
+        # primary action at the leftmost position consistently for
+        # both in-flight and completed rows.
         row_actions = (
+            WatchProgressAction,
             ViewResultAction,
             DownloadJsonAction,
             DeleteAnalysisAction,

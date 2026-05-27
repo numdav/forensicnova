@@ -119,8 +119,8 @@ class NewAnalysisForm(forms.Form):
 
     PRESET_CHOICES = (
         ("",       _("— pick a preset —")),
-        ("fast",   _("fast — 5 plugins, ~17s on 4 GiB (triage)")),
-        ("full",   _("full — 17 plugins, ~4-5min on 4 GiB (deep dive)")),
+        ("fast",   _("fast — 11 plugins, ~2-3 min on 4 GiB (triage)")),
+        ("full",   _("full — 34 plugins, ~10-13 min on 4 GiB (deep dive)")),
         ("custom", _("custom — pick specific plugins below")),
     )
 
@@ -140,9 +140,13 @@ class NewAnalysisForm(forms.Form):
         required=False,
         initial="fast",
         help_text=_(
-            "'fast' is the default triage; "
-            "'full' adds 12 deep-dive plugins covering all SANS "
-            "macro-areas of memory forensics; "
+            "'fast' is the default first-response triage: covers "
+            "the highest-signal plugins in each SANS FOR508 stage "
+            "(rogue processes, PowerShell history, services, code "
+            "injection); "
+            "'full' adds 23 deep-dive plugins for complete SANS "
+            "FOR508 six-stage coverage including rootkit detection, "
+            "anti-EDR syscall analysis, and persistence artifacts; "
             "'custom' lets you pick exactly which plugins to run."
         ),
     )
