@@ -86,7 +86,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger("forensicnova_analyzer.analyzers.volatility")
 
@@ -333,12 +333,75 @@ _HASH_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 #     - Who's calling out?    (netscan)  — exposes C2 callbacks
 #     - What system is this?  (info)     — kernel build, banner, DTB
 
+# "fast" preset — 11 plugins for first-response triage (~2-3 min).
+#
+# Goal: an analyst running this on a fresh dump should, within ~3 minutes,
+# have enough signal to decide whether the system is compromised.
+#
+# Coverage by SANS FOR508 6-stage methodology:
+#   Stage 1 (Rogue Processes)   pslist, pstree, malware.psxview
+#   Stage 2 (Process Objects)   cmdline, cmdscan, consoles, getsids
+#   Stage 3 (Network)           netscan
+#   Stage 4 (Code Injection)    malware.malfind
+#   Stage 6 (Persistence)       svcscan
+#   Metadata                    info
+#
+# Notes on the six additions vs the original 5-plugin set:
+#
+#   - windows.malware.psxview.PsXView
+#       Cross-view discrepancy detection (DKOM-hidden processes).
+#       Compares pslist / psscan / CSR / handles / sessions; any
+#       process appearing in only some lists is flagged. Catches
+#       rootkits that unlink EPROCESS structures from ActiveProcessLinks.
+#
+#   - windows.cmdscan.CmdScan
+#       Recovers Windows command history from the conhost.exe buffer
+#       (the typed-into-shell history). Survives the console being
+#       closed as long as conhost.exe is still alive. PRIMARY signal
+#       for PowerShell-based attacks (-Hidden -EncodedCommand patterns,
+#       Invoke-Expression, fileless reflective loads).
+#
+#   - windows.consoles.Consoles
+#       Sister plugin to cmdscan. Reconstructs full console sessions
+#       including the screen buffer (i.e. what the attacker actually
+#       SAW). Useful for Mimikatz output recovery, network-recon
+#       command output, etc.
+#
+#   - windows.getsids.GetSIDs
+#       Process security identifiers. SANS stage 2 mandatory step:
+#       spots processes running as SYSTEM/Admin that shouldn't be
+#       (privilege escalation, token theft, SeImpersonatePrivilege
+#       abuse), and surfaces unusual SID chains.
+#
+#   - windows.svcscan.SvcScan
+#       Windows services scan. Critical persistence technique 2025+:
+#       Meterpreter `getsystem`, Cobalt Strike services beacon, modern
+#       ransomware (LockBit, BlackCat) all register as services for
+#       boot persistence. The plugin enumerates SCM in memory, which
+#       can catch services hidden from registry tampering.
+#
+#   - windows.malware.malfind.Malfind
+#       Promoted from full-only to fast because injected RWX VAD
+#       regions are arguably the #1 signal of process injection
+#       (Meterpreter migrate, Cobalt Strike beacon, shellcode loaders).
+#       Costs ~30-60s but worth the budget for triage value.
+#
+# Expected runtime on a 4 GiB Windows Server 2022 dump: 2-3 minutes
+# (up from ~30 seconds for the previous 5-plugin set). Acceptable for
+# a first-response preset where the operator is waiting.
+
 PRESET_FAST_WINDOWS = [
     "windows.info.Info",
     "windows.pslist.PsList",
     "windows.pstree.PsTree",
+    "windows.malware.psxview.PsXView",
     "windows.cmdline.CmdLine",
+    "windows.cmdscan.CmdScan",
+    "windows.consoles.Consoles",
+    "windows.getsids.GetSIDs",
     "windows.netscan.NetScan",
+    "windows.svcscan.SvcScan",
+    "windows.malware.malfind.Malfind",
 ]
 
 # Linux is out of scope of the thesis demo (no ISF symbol pipeline).
@@ -389,21 +452,53 @@ PRESET_FAST_LINUX: list[str] = []
 # preset that is run after fast triage flags something suspicious.
 
 PRESET_FULL_WINDOWS = [
+    # ----- Metadata -----
     "windows.info.Info",
+
+    # ----- Stage 1: Identify Rogue Processes -----
     "windows.pslist.PsList",
     "windows.psscan.PsScan",
     "windows.pstree.PsTree",
+    "windows.malware.psxview.PsXView",
+
+    # ----- Stage 2: Analyze Process Objects -----
     "windows.cmdline.CmdLine",
+    "windows.cmdscan.CmdScan",
+    "windows.consoles.Consoles",
     "windows.handles.Handles",
     "windows.dlllist.DllList",
+    "windows.getsids.GetSIDs",
+
+    # ----- Stage 3: Review Network Artifacts -----
     "windows.netscan.NetScan",
+    "windows.netstat.NetStat",
+
+    # ----- Stage 4: Look for Evidence of Code Injection -----
     "windows.malware.malfind.Malfind",
     "windows.malware.ldrmodules.LdrModules",
     "windows.malware.hollowprocesses.HollowProcesses",
+    "windows.malware.suspicious_threads.SuspiciousThreads",
+    "windows.malware.pebmasquerade.PebMasquerade",
+    "windows.malware.processghosting.ProcessGhosting",
     "windows.malware.direct_system_calls.DirectSystemCalls",
     "windows.malware.indirect_system_calls.IndirectSystemCalls",
+    "windows.malware.unhooked_system_calls.UnhookedSystemCalls",
+
+    # ----- Stage 5: Audit Drivers and Rootkit Detection -----
     "windows.modules.Modules",
+    "windows.modscan.ModScan",
     "windows.ssdt.SSDT",
+    "windows.driverirp.DriverIrp",
+    "windows.callbacks.Callbacks",
+
+    # ----- Stage 6: Persistence & Execution Evidence -----
+    "windows.svcscan.SvcScan",
+    "windows.malware.svcdiff.SvcDiff",
+    "windows.registry.scheduled_tasks.ScheduledTasks",
+    "windows.registry.userassist.UserAssist",
+    "windows.amcache.Amcache",
+
+    # ----- Credentials -----
     "windows.registry.hashdump.Hashdump",
     "windows.registry.lsadump.Lsadump",
 ]
@@ -643,6 +738,26 @@ PLUGIN_TIMEOUTS = {
     # the number of processes in the dump. 600s allows for substantial
     # rule packs (hundreds of rules) on a 4 GiB dump.
     "windows.vadyarascan.VadYaraScan":      600,
+
+    # ----- Round 2 additions (Stage Vol3-Extension-Round-2) -----
+    # Plugins added to expand SANS FOR508 6-stage coverage. Timeouts
+    # tuned for a 4 GiB Windows Server 2022 dump with 3-5x safety
+    # margin over empirically observed worst case. Where an empirical
+    # measurement is not yet available, a conservative default is set.
+    #
+    # PowerShell / Console history (lightweight, conhost.exe parsing):
+    "windows.cmdscan.CmdScan":              120,
+    "windows.consoles.Consoles":            120,
+    # Persistence (services + scheduled tasks):
+    "windows.svcscan.SvcScan":               90,
+    "windows.malware.svcdiff.SvcDiff":      120,
+    "windows.registry.scheduled_tasks.ScheduledTasks": 120,
+    "windows.registry.userassist.UserAssist":           60,
+    # Hidden-process / masquerading detection:
+    "windows.malware.psxview.PsXView":      120,
+    "windows.malware.pebmasquerade.PebMasquerade":      120,
+    # Anti-EDR detection (capstone-based, scales with process count):
+    "windows.malware.unhooked_system_calls.UnhookedSystemCalls": 300,
 }
 
 
@@ -798,7 +913,7 @@ class VolatilityAnalyzer:
     """
 
     name = "volatility"
-    version = "0.3.0"
+    version = "0.4.0"
 
     SUPPORTED_PRESETS = frozenset({"fast", "full", "custom"})
 
@@ -819,6 +934,7 @@ class VolatilityAnalyzer:
         preset: str = "fast",
         plugins: Optional[list[str]] = None,
         per_plugin_timeout: int = DEFAULT_PLUGIN_TIMEOUT,
+        on_plugin_start: Optional[Callable[[str, int, int], None]] = None,
     ) -> dict:
         """Execute the requested preset and return an aggregated result.
 
@@ -831,6 +947,17 @@ class VolatilityAnalyzer:
         :param plugins:            explicit plugin FQN list — only honoured
                                    when preset=="custom"; ignored otherwise
         :param per_plugin_timeout: passed to each run_plugin() call
+        :param on_plugin_start:    optional callback invoked BEFORE each
+                                   plugin starts running. Signature:
+                                   ``callback(plugin_name, idx_one_based, total)``.
+                                   The runner uses this to update the job
+                                   label so the dashboard watch page shows
+                                   live progress (e.g. "Running plugin 12/34:
+                                   windows.malware.malfind.Malfind") instead
+                                   of a static elapsed counter for ~15 min.
+                                   Callback exceptions are caught and logged
+                                   so a buggy callback cannot abort the
+                                   analysis loop.
 
         :returns: dict per the schema in the class docstring.
         :raises ValueError: if preset is not in SUPPORTED_PRESETS.
@@ -955,12 +1082,26 @@ class VolatilityAnalyzer:
         plugin_results: dict[str, dict] = {}
         counts = {"ok": 0, "failed": 0, "timeout": 0, "parse_error": 0}
 
-        for plugin_name in plugin_list:
+        for idx, plugin_name in enumerate(plugin_list, start=1):
             this_timeout = PLUGIN_TIMEOUTS.get(plugin_name, per_plugin_timeout)
             log.info(
-                "[volatility] running plugin: %s (timeout=%ds)",
-                plugin_name, this_timeout,
+                "[volatility] running plugin %d/%d: %s (timeout=%ds)",
+                idx, len(plugin_list), plugin_name, this_timeout,
             )
+            # Notify the runner BEFORE the (potentially slow) subprocess
+            # starts, so the dashboard watch page can show the plugin
+            # name while it is in flight rather than only after it
+            # finishes. Callback failures are swallowed: a bug in the
+            # progress reporter must never abort the analysis pipeline.
+            if on_plugin_start is not None:
+                try:
+                    on_plugin_start(plugin_name, idx, len(plugin_list))
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "[volatility] on_plugin_start callback raised "
+                        "for plugin=%s idx=%d/%d (ignored, pipeline continues)",
+                        plugin_name, idx, len(plugin_list),
+                    )
             result = run_plugin(
                 dump_path=dump_path,
                 plugin_name=plugin_name,

@@ -68,7 +68,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from forensicnova_analyzer import swift
 from forensicnova_analyzer.analyzers import NoOpAnalyzer, VolatilityAnalyzer
@@ -254,6 +254,29 @@ def _run_analysis(
             job_id, PHASE_RUNNING_ANALYZER,
             f"Running {analyzer_name} analyzer",
         )
+
+        # Per-plugin progress callback for the dashboard watch page.
+        # The VolatilityAnalyzer invokes this BEFORE starting each
+        # plugin's subprocess, so the user sees what the analyzer is
+        # currently doing (e.g. "Running plugin 12/34: windows.malware.
+        # malfind.Malfind") instead of a static "Running volatility
+        # analyzer" label for the entire 8-15 minute full-preset run.
+        #
+        # Captures job_id and jobs from the enclosing scope. The
+        # JobManager's update_label is the canonical fine-grained
+        # progress signal (documented in jobs.py as "e.g. Vol3
+        # per-plugin"), so the dashboard's existing label rendering
+        # picks this up via the standard 3-second poll without any
+        # template changes.
+        #
+        # Analyzers that do not invoke plugins (noop) silently ignore
+        # the callback; the parameter is keyword-only and Optional.
+        def _progress(plugin_name: str, idx: int, total: int) -> None:
+            jobs.update_label(
+                job_id,
+                f"Running plugin {idx}/{total}: {plugin_name}",
+            )
+
         result = _dispatch_analyzer(
             analyzer_name=analyzer_name,
             dump_path=dump_path,
@@ -261,6 +284,7 @@ def _run_analysis(
             preset=preset,
             plugins=plugins,
             cfg=cfg,
+            on_progress=_progress,
         )
 
         # Strict coherence policy: if the analyzer says hashes do not
@@ -541,6 +565,7 @@ def _dispatch_analyzer(
     preset: Optional[str],
     plugins: Optional[list[str]],
     cfg,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> dict:
     """Dispatch to the requested analyzer class and return its result dict.
 
@@ -551,6 +576,13 @@ def _dispatch_analyzer(
     `cfg` is needed by VolatilityAnalyzer to locate the XDG_CACHE_HOME
     directory (<cfg.work_dir>/vol3-cache) where Vol3 caches PDB
     symbol files between runs.
+
+    `on_progress`, when provided, is forwarded to VolatilityAnalyzer
+    as its ``on_plugin_start`` hook. The caller in _run_analysis
+    builds a lambda that calls jobs.update_label() so the dashboard
+    watch page shows live per-plugin progress instead of a frozen
+    elapsed counter for the duration of a multi-minute full preset.
+    The noop analyzer ignores the callback (it does not run plugins).
     """
     if analyzer_name == "noop":
         return NoOpAnalyzer().run(
@@ -567,6 +599,7 @@ def _dispatch_analyzer(
             summary=summary,
             preset=preset or "fast",
             plugins=plugins,
+            on_plugin_start=on_progress,
         )
     raise ValueError(f"unknown analyzer: {analyzer_name!r}")
 
