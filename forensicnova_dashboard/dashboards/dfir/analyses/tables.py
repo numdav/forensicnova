@@ -17,6 +17,8 @@ Row actions:
 """
 import logging
 
+from django import shortcuts
+from django.contrib import messages
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
 from django.urls import reverse
@@ -79,6 +81,30 @@ def _format_status(row) -> str:
         if label and label.lower() != "running":
             return f"{base} — {label}"
     return base
+
+
+def _format_threat_score(row) -> str:
+    """MISP threat score as a coloured glyph badge.
+
+    The score is computed by the MispEnricher (5 deterministic rules)
+    and persisted onto the job record by jobs_runner at completion, so
+    we read it straight off the row without an extra fetch.
+
+    Only MISP-enrichment jobs carry a threat_score; volatility jobs and
+    any not-yet-completed job have none, so they render as "—". We keep
+    the same glyph+word style as _format_status for visual consistency
+    (no inline HTML/colour spans — the rest of this table is plain
+    Unicode glyphs).
+    """
+    score = (row.get("threat_score") or "").strip().lower()
+    glyph = {
+        "red":    "🔴",
+        "yellow": "🟡",
+        "green":  "🟢",
+    }.get(score)
+    if not glyph:
+        return "—"
+    return f"{glyph} {score}"
 
 
 def _format_duration(row) -> str:
@@ -147,6 +173,110 @@ class WatchProgressAction(tables.LinkAction):
 
     def get_link_url(self, datum):
         return reverse(self.url, kwargs={"job_id": datum["job_id"]})
+
+
+class TriggerMispEnrichmentAction(tables.Action):
+    """Trigger a MISP enrichment on a completed volatility analysis.
+
+    This is an Action (POST), not a LinkAction: clicking it has a side
+    effect (it creates a new analyzer job) rather than just navigating.
+    Horizon calls single() with the row's object_id (== job_id, per
+    AnalysesTable.get_object_id); we resolve the full row via
+    get_object_by_id to read the source analysis_id, POST it to the
+    dedicated MISP endpoint, then redirect to the same watch page the
+    volatility flow uses (the watch page is analyzer-agnostic: it polls
+    the job and redirects to the analysis detail on completion).
+
+    Visibility (allowed): only on COMPLETED VOLATILITY jobs that have an
+    analysis_id. A MISP enrichment consumes an analysis-volatility-*.json
+    as input, so it makes no sense on misp rows (no double-enrichment),
+    on failed/pending rows (no output to enrich), or on noop rows.
+    """
+    name = "misp_enrich"
+    verbose_name = _("MISP enrich")
+    # POST is the default for Action; stated here for clarity since this
+    # mutates state (creates a job).
+    method = "POST"
+    # requires_input=True: this action needs a specific row (object id),
+    # it is not a no-arg table-wide action.
+    requires_input = True
+    icon = "search"
+    classes = ("btn-info",)
+
+    def allowed(self, request, datum=None):
+        return bool(
+            datum
+            and datum.get("analyzer") == "volatility"
+            and datum.get("status") == "completed"
+            and datum.get("analysis_id")
+        )
+
+    def single(self, data_table, request, object_id):
+        # object_id is the job_id (AnalysesTable.get_object_id). Resolve
+        # the full row to read the source analysis_id, which is what the
+        # MISP endpoint takes as input_analysis_id.
+        datum = data_table.get_object_by_id(object_id)
+        input_analysis_id = (datum or {}).get("analysis_id")
+        if not input_analysis_id:
+            messages.error(
+                request,
+                _("Cannot enrich: this job has no analysis_id."),
+            )
+            return shortcuts.redirect("horizon:dfir:analyses:index")
+
+        LOG.info(
+            "horizon -> trigger MISP enrichment: user=%s input_analysis_id=%s",
+            getattr(request.user, "username", "?"),
+            input_analysis_id,
+        )
+        try:
+            resp = fn_api.trigger_misp_enrichment(request, input_analysis_id)
+        except fn_api.ForensicNovaUnavailable as exc:
+            messages.error(
+                request,
+                _("Analyzer service is unreachable: %s") % exc,
+            )
+            return shortcuts.redirect("horizon:dfir:analyses:index")
+        except fn_api.ForensicNovaForbidden:
+            messages.error(
+                request,
+                _("Backend rejected the request (403). "
+                  "Check the forensic_analyst role."),
+            )
+            return shortcuts.redirect("horizon:dfir:analyses:index")
+        except fn_api.ForensicNovaNotFound:
+            messages.error(
+                request,
+                _("Source analysis %s not found in the analyzer backend.")
+                % input_analysis_id,
+            )
+            return shortcuts.redirect("horizon:dfir:analyses:index")
+        except fn_api.ForensicNovaApiError as exc:
+            # The backend returns 400 with a structured message for
+            # invalid input (e.g. the source analysis failed its own
+            # coherence check, or is not a volatility analysis). Show it
+            # verbatim — it carries the diagnostic the analyst needs.
+            messages.error(
+                request,
+                _("MISP enrichment trigger failed: %s") % exc,
+            )
+            return shortcuts.redirect("horizon:dfir:analyses:index")
+
+        job_id = resp.get("job_id")
+        if not job_id:
+            messages.error(
+                request,
+                _("Backend did not return a job_id."),
+            )
+            return shortcuts.redirect("horizon:dfir:analyses:index")
+
+        messages.info(
+            request,
+            _("MISP enrichment started — watching progress…"),
+        )
+        return shortcuts.redirect(
+            "horizon:dfir:analyses:watch", job_id=job_id,
+        )
 
 
 class DownloadJsonAction(tables.LinkAction):
@@ -283,6 +413,13 @@ class AnalysesTable(tables.DataTable):
         _format_status,
         verbose_name=_("Status"),
     )
+    # Threat score is only populated on MISP-enrichment rows; volatility
+    # and not-yet-completed rows render "—". Placed next to Status so the
+    # analyst reads "is it done?" and "is it dangerous?" together.
+    threat_score = tables.Column(
+        _format_threat_score,
+        verbose_name=_("Threat"),
+    )
     duration = tables.Column(
         _format_duration,
         verbose_name=_("Duration"),
@@ -303,6 +440,7 @@ class AnalysesTable(tables.DataTable):
         row_actions = (
             WatchProgressAction,
             ViewResultAction,
+            TriggerMispEnrichmentAction,
             DownloadJsonAction,
             DeleteAnalysisAction,
         )

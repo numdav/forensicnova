@@ -430,6 +430,26 @@ def trigger_analysis(
     )
 
 
+def trigger_misp_enrichment(request, input_analysis_id: str) -> dict:
+    """POST /api/v1/misp-enrichments — async, returns {job_id, ...}.
+
+    Enriches an existing volatility analysis with MISP threat intel.
+    The body carries the source analysis object name (NOT a dump):
+    the backend extracts IOCs from that analysis-volatility-*.json,
+    queries MISP, and writes an analysis-misp-*.json. Returns 202 in
+    milliseconds; the enrichment runs in a background thread. Caller
+    redirects to the watch view, which polls get_analyzer_job().
+
+    This targets the dedicated MISP endpoint (NOT trigger_analysis with
+    analyzer='misp'): the input is another analysis, not a dump, so it
+    has no preset/plugins and a distinct request shape.
+    """
+    return _post_analyzer(
+        request, "/api/v1/misp-enrichments",
+        {"input_analysis_id": input_analysis_id},
+    )
+
+
 def get_analyzer_job(request, job_id: str) -> dict:
     """GET /api/v1/jobs/<id> on the analyzer backend.
 

@@ -150,6 +150,20 @@ class DetailView(generic.TemplateView):
 
         ctx["analysis"] = analysis
 
+        # Branch by analyzer type. The volatility path keeps its existing
+        # per-plugin summary table; the misp path prepares an analogous
+        # IOC table plus the threat-score box, reading the misp schema's
+        # own field locations (timestamps/duration are top-level, the
+        # coherence flag lives under source.hashes_match_report).
+        analyzer = (analysis.get("analyzer") or "").strip().lower()
+        ctx["is_misp"] = (analyzer == "misp")
+
+        if ctx["is_misp"]:
+            ctx["plugins_summary"] = []  # not used in the misp template
+            self._build_misp_context(ctx, analysis)
+            return ctx
+
+        # ---- volatility path (unchanged) ----------------------------
         # Flatten plugin results into a sortable list of dicts for the
         # template. We do NOT pass the raw rows array (potentially
         # thousands of records) — the user downloads JSON for that.
@@ -171,6 +185,76 @@ class DetailView(generic.TemplateView):
         )
         ctx["plugins_summary"] = plugins_summary
         return ctx
+
+    @staticmethod
+    def _build_misp_context(ctx, analysis):
+        """Populate the context for a MISP-enrichment analysis.
+
+        Mirrors the volatility detail layout with misp data:
+          - misp_threat_score / _reason  -> coloured status box
+          - misp_coherence_ok            -> source.hashes_match_report
+          - misp_summary                 -> aggregate counts + actors/etc
+          - misp_iocs                    -> one row per enriched IOC
+                                            (the analogue of the plugin
+                                            table), matched IOCs first.
+        """
+        summary = analysis.get("summary") or {}
+        source = analysis.get("source") or {}
+
+        ctx["misp_threat_score"] = (summary.get("threat_score") or "").lower()
+        ctx["misp_threat_score_reason"] = summary.get("threat_score_reason")
+        ctx["misp_coherence_ok"] = bool(source.get("hashes_match_report"))
+
+        # Aggregate summary block (joined lists render as plain text, in
+        # keeping with the lightweight style of the rest of the table).
+        ctx["misp_summary"] = {
+            "total_iocs_extracted": summary.get("total_iocs_extracted"),
+            "total_iocs_checked":   summary.get("total_iocs_checked"),
+            "total_iocs_filtered":  summary.get("total_iocs_filtered"),
+            "iocs_with_misp_match": summary.get("iocs_with_misp_match"),
+            "iocs_without_match":   summary.get("iocs_without_match"),
+            "unique_actors":  ", ".join(summary.get("unique_actors") or []),
+            "unique_galaxies": ", ".join(summary.get("unique_galaxies") or []),
+            "unique_attck":   ", ".join(summary.get("unique_attck") or []),
+        }
+
+        # Main table: one row per enriched IOC. Each row carries the
+        # IOC type/value, the number of MISP events it matched, and a
+        # compact rollup of actors and galaxies seen across those
+        # events. Matched IOCs are surfaced first (descending match
+        # count) so the analyst sees the hits before the misses.
+        iocs = []
+        for entry in (analysis.get("enrichment") or []):
+            events = entry.get("events") or []
+            actors = set()
+            galaxies = set()
+            event_infos = []
+            for ev in events:
+                a = (ev.get("attribution") or {}).get("actor")
+                if a:
+                    actors.add(a)
+                # actor_hint is heuristic; show it too but marked, so the
+                # analyst can tell structured attribution from a guess.
+                hint = (ev.get("attribution") or {}).get("actor_hint")
+                if hint and not a:
+                    actors.add(f"{hint}?")
+                for g in (ev.get("galaxies") or []):
+                    v = g.get("value")
+                    if v:
+                        galaxies.add(v)
+                if ev.get("info"):
+                    event_infos.append(ev["info"])
+            iocs.append({
+                "ioc_type":   entry.get("ioc_type"),
+                "ioc_value":  entry.get("ioc_value"),
+                "context":    entry.get("context"),
+                "misp_match": entry.get("misp_match") or 0,
+                "actors":     ", ".join(sorted(actors)),
+                "galaxies":   ", ".join(sorted(galaxies)),
+                "event_info": "; ".join(event_infos[:3]),
+            })
+        iocs.sort(key=lambda x: -(x.get("misp_match") or 0))
+        ctx["misp_iocs"] = iocs
 
 
 # ---------------------------------------------------------------------------
