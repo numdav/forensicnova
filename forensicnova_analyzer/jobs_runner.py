@@ -687,3 +687,254 @@ def _build_analysis_json(
         "result": analyzer_result,
     }
     return json.dumps(payload, indent=2, sort_keys=False).encode("utf-8")
+# ============================================================================
+# MISP ENRICHMENT — Stage F.2 Step F
+# ----------------------------------------------------------------------------
+# Parallel to _run_analysis() but structurally different: the input is
+# another analysis JSON (not a RAM dump), and the witnessing chain is
+# different (we validate the COHERENCE FLAG of the source analysis
+# instead of recomputing hashes on a binary). Kept as a separate
+# top-level pipeline so the existing dump-based code stays untouched.
+# ============================================================================
+
+def start_misp_enrichment_job(
+    *,
+    cfg,
+    jobs: JobManager,
+    job_id: str,
+    input_analysis_id: str,
+    operator: str,
+) -> threading.Thread:
+    """Spawn the worker thread for a MISP enrichment job and return it.
+
+    Unlike start_analysis_job, the input is the Swift object name of an
+    existing analysis-volatility-*.json (NOT an acquisition_id). The
+    job record must already exist (created by the HTTP endpoint).
+    """
+    t = threading.Thread(
+        target=_run_misp_enrichment,
+        kwargs={
+            "cfg":                cfg,
+            "jobs":               jobs,
+            "job_id":             job_id,
+            "input_analysis_id":  input_analysis_id,
+            "operator":           operator,
+        },
+        name=f"forensicnova-misp-{job_id[:8]}",
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
+def _run_misp_enrichment(
+    cfg,
+    jobs: JobManager,
+    job_id: str,
+    input_analysis_id: str,
+    operator: str,
+) -> None:
+    """Full MISP enrichment pipeline, executed in a background thread.
+
+    Pipeline (reuses PHASE_* constants from jobs.py with runtime
+    labels adapted to the MISP flow):
+
+      1. PHASE_DOWNLOADING_DUMP  — label: "Downloading source analysis
+                                    JSON from Swift" (we reuse the
+                                    swift.download_dump_with_hashes
+                                    helper; the "dump" in its name is
+                                    historical, it works for any object)
+      2. PHASE_VERIFYING_HASH    — label: "Validating source analysis
+                                    coherence" (we check that the
+                                    input JSON itself reports
+                                    hashes_match_report=True; we do NOT
+                                    recompute hashes because we have
+                                    no dump to recompute against)
+      3. PHASE_RUNNING_ANALYZER  — label: "Running MISP enrichment"
+      4. PHASE_UPLOADING_RESULTS — label: "Uploading analysis-misp JSON"
+    """
+    import configparser
+    import json as _json
+
+    log.info(
+        "[job=%s] MISP enrichment worker started (input=%s)",
+        job_id, input_analysis_id,
+    )
+
+    try:
+        # ----- 1. PHASE: download source analysis from Swift ---------
+        jobs.update_phase(
+            job_id, PHASE_DOWNLOADING_DUMP,
+            "Downloading source analysis JSON from Swift",
+        )
+        work_dir = Path(cfg.work_dir) / "misp-input" / job_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        input_local_path = work_dir / "source-analysis.json"
+
+        def _dl_progress(label: str) -> None:
+            jobs.update_label(job_id, label)
+
+        # Reuse the existing Swift download primitive. It computes
+        # md5/sha1 but we don't validate them against anything (the
+        # source analysis JSON has its own internal integrity proofs
+        # we check in step 2). The hashes are still useful for logs.
+        downloaded = swift.download_dump_with_hashes(
+            object_name=input_analysis_id,
+            dest_path=input_local_path,
+            cfg=cfg,
+            progress_callback=_dl_progress,
+        )
+        log.info(
+            "[job=%s] source analysis downloaded: %s (%d bytes, md5=%s)",
+            job_id, input_local_path, downloaded["size_bytes"],
+            downloaded["md5"][:8],
+        )
+
+        # ----- 2. PHASE: validate source coherence -------------------
+        jobs.update_phase(
+            job_id, PHASE_VERIFYING_HASH,
+            "Validating source analysis coherence",
+        )
+        with input_local_path.open("r", encoding="utf-8") as fh:
+            source_analysis = _json.load(fh)
+
+        # Hard pre-check: the source analysis MUST be a Vol3 result
+        # whose own coherence check passed. We refuse to enrich an
+        # analysis whose dump integrity was already in doubt — that
+        # would propagate uncertainty silently into the MISP output.
+        # MispEnricher.run() re-checks this internally; doing it here
+        # too gives a cleaner fail_job message and avoids loading the
+        # MISP client when we already know we'd abort.
+        if source_analysis.get("analyzer") != "volatility":
+            raise ValueError(
+                f"input_analysis_id {input_analysis_id!r} is not a "
+                f"volatility analysis (analyzer="
+                f"{source_analysis.get('analyzer')!r}); MISP enrichment "
+                f"only accepts Vol3 outputs as input"
+            )
+        coh = source_analysis.get("coherence_check") or {}
+        if not coh.get("hashes_match_report"):
+            raise swift.IntegrityError(
+                f"source analysis {input_analysis_id!r} failed its own "
+                f"hash coherence check; refusing to enrich it"
+            )
+        os_hint = (source_analysis.get("result") or {}).get("os_hint")
+        if os_hint != "windows":
+            raise ValueError(
+                f"source analysis has os_hint={os_hint!r}; MISP "
+                f"enrichment is currently Windows-only"
+            )
+        acquisition_id = source_analysis.get("acquisition_id") or "unknown"
+
+        # ----- 3. PHASE: run MISP enricher ---------------------------
+        jobs.update_phase(
+            job_id, PHASE_RUNNING_ANALYZER,
+            "Running MISP enrichment",
+        )
+
+        # Lazy import to keep noop/volatility-only deployments from
+        # paying the pymisp import cost. Same pattern as the swift
+        # client import at the top of this module: heavy deps go in
+        # the function body of the dispatcher that needs them.
+        from forensicnova_analyzer.analyzers.misp import MispEnricher
+
+        # Load MISP server config from /etc/forensicnova/misp.conf.
+        # This file is owned by stack:stack with mode 0600 and was
+        # provisioned by the DevStack plugin in Stage F.1. The path
+        # is fixed by convention (not in cfg) because the analyzer
+        # service runs as stack and reads the file directly.
+        misp_conf_path = "/etc/forensicnova/misp.conf"
+        misp_cfg = configparser.ConfigParser()
+        if not misp_cfg.read(misp_conf_path):
+            raise FileNotFoundError(
+                f"MISP config not found at {misp_conf_path}; "
+                f"was the F.1 plugin step skipped?"
+            )
+        msec = misp_cfg["misp"]
+        enricher = MispEnricher(
+            url=msec["url"],
+            auth_key=msec["auth_key"],
+            verify_cert=msec.getboolean("verify_cert", fallback=False),
+            timeout=msec.getint("timeout", fallback=30),
+        )
+
+        analysis_json_dict = enricher.run(
+            input_analysis_json=source_analysis,
+            operator=operator,
+        )
+
+        # ----- 4. PHASE: upload analysis-misp result -----------------
+        jobs.update_phase(
+            job_id, PHASE_UPLOADING_RESULTS,
+            "Uploading analysis-misp JSON to Swift",
+        )
+
+        # MispEnricher.run() already computed the canonical analysis_id
+        # (analysis-misp-<acq>-<UTC>-<job8>) and put it in the output
+        # dict. Use it verbatim as the Swift object name so the
+        # filename and the embedded id stay consistent.
+        analysis_object_name = analysis_json_dict["analysis_id"] + ".json"
+
+        json_bytes = _json.dumps(
+            analysis_json_dict, indent=2, sort_keys=False,
+        ).encode("utf-8")
+
+        upload_metadata = {
+            "analysis_id":         analysis_json_dict["analysis_id"],
+            "analyzer":            "misp",
+            "acquisition_id":      acquisition_id,
+            "operator":            operator,
+            "schema_version":      ANALYSIS_SCHEMA_VERSION,
+            "input_analysis_id":   input_analysis_id,
+        }
+        upload_result = swift.upload_analysis_json(
+            json_bytes=json_bytes,
+            object_name=analysis_object_name,
+            metadata=upload_metadata,
+            cfg=cfg,
+        )
+
+        jobs.update_analysis_id(job_id, analysis_object_name)
+
+        # ----- COMPLETED ---------------------------------------------
+        summary = analysis_json_dict.get("summary") or {}
+        jobs.complete_job(job_id, {
+            "analysis_id":          analysis_object_name,
+            "swift_object":         upload_result["swift_object"],
+            "swift_etag":           upload_result["swift_etag"],
+            "size_bytes":           upload_result["size_bytes"],
+            "duration_seconds":     analysis_json_dict.get("duration_seconds"),
+            "threat_score":         summary.get("threat_score"),
+            "threat_score_reason":  summary.get("threat_score_reason"),
+            "iocs_checked":         summary.get("total_iocs_checked"),
+            "iocs_with_match":      summary.get("iocs_with_misp_match"),
+        })
+        log.info(
+            "[job=%s] MISP DONE: analysis_id=%s score=%s size=%d",
+            job_id, analysis_object_name,
+            summary.get("threat_score"), upload_result["size_bytes"],
+        )
+
+    except swift.SwiftObjectNotFound as exc:
+        log.error("[job=%s] swift object not found: %s", job_id, exc)
+        jobs.fail_job(job_id, f"Swift object not found: {exc}")
+
+    except swift.IntegrityError as exc:
+        log.error("[job=%s] integrity failure: %s", job_id, exc)
+        jobs.fail_job(job_id, f"Integrity verification failed: {exc}")
+
+    except ValueError as exc:
+        log.error("[job=%s] invalid input: %s", job_id, exc)
+        jobs.fail_job(job_id, f"Invalid input: {exc}")
+
+    except FileNotFoundError as exc:
+        log.error("[job=%s] file not found: %s", job_id, exc)
+        jobs.fail_job(job_id, f"File not found: {exc}")
+
+    except (PermissionError, OSError) as exc:
+        log.error("[job=%s] filesystem error: %s", job_id, exc)
+        jobs.fail_job(job_id, f"Filesystem error: {exc}")
+
+    except Exception as exc:  # noqa: BLE001
+        log.exception("[job=%s] unexpected MISP enrichment error", job_id)
+        jobs.fail_job(job_id, f"Internal error: {exc}")
