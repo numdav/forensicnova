@@ -852,7 +852,7 @@ def _run_misp_enrichment(
             )
         msec = misp_cfg["misp"]
         enricher = MispEnricher(
-            url=msec["url"],
+            misp_url=msec["url"],
             auth_key=msec["auth_key"],
             verify_cert=msec.getboolean("verify_cert", fallback=False),
             timeout=msec.getint("timeout", fallback=30),
