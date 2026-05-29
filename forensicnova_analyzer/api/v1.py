@@ -667,3 +667,160 @@ def delete_cache_endpoint(acquisition_id: str):
         "deleted" if result.get("deleted") else "noop",
     )
     return jsonify(result), 200
+
+# ===========================================================================
+# MISP ENRICHMENT ENDPOINTS — Stage F.2 Step G
+# ---------------------------------------------------------------------------
+# Dedicated routes for the MISP enricher. We deliberately do NOT add
+# 'misp' to _KNOWN_ANALYZERS / reuse POST /analyses/<acquisition_id>:
+# the enricher is structurally a different operation (input is another
+# analysis JSON, not a RAM dump; no preset/plugins; no acquisition
+# existence check needed). Keeping it on its own endpoint avoids
+# branchy validation logic in the volatility path and makes the API
+# surface easier to read for thesis-defence and future maintainers.
+#
+# Results — being plain analysis-misp-*.json objects in the Swift
+# 'forensics' container — are already addressable via the existing
+# generic endpoints:
+#   - GET /api/v1/analyses/<acquisition_id>     -> lists ALL analyses
+#     for that dump, including the MISP enrichments, sorted newest-
+#     first (filename embeds UTC).
+#   - GET /api/v1/analyses/by-id/<analysis_id>  -> returns the raw
+#     JSON of an analysis-misp-*.json by its Swift object name.
+#     The dashboard's "Download JSON" link will point here.
+# No new read endpoints are needed; the dispatcher already names the
+# Swift object as 'analysis-misp-<acquisition_id>-<UTC>-<job8>.json',
+# so the substring-match filter in list-analyses picks it up for free.
+# ===========================================================================
+
+import re as _re
+
+# Parse the acquisition_id out of a Volatility analysis filename
+# WITHOUT making an extra Swift HEAD round-trip. Pattern:
+#   analysis-volatility[-<preset>]-<UUID>-<UTC>-<job8>.json
+# UUID is RFC4122 8-4-4-4-12; preset is one of fast/full/custom.
+# Anything else is rejected at the API boundary (400 malformed_input).
+_ACQ_FROM_VOL_ANALYSIS = _re.compile(
+    r'^analysis-volatility'
+    r'(?:-(?:fast|full|custom))?'
+    r'-(?P<acq>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+    r'-\d{8}T\d{6}Z-[0-9a-f]{8}\.json$'
+)
+
+
+@api_v1_bp.route("/misp-enrichments", methods=["POST"])
+def trigger_misp_enrichment_endpoint():
+    """Start a new async MISP enrichment job.
+
+    Body JSON:
+        {"input_analysis_id": "analysis-volatility-..."}
+
+    The input MUST be a Volatility analysis (the enricher refuses
+    other source types — see MispEnricher.run() preconditions). The
+    acquisition_id is extracted from the filename pattern so we can
+    populate the job record consistently with the volatility-side
+    pipeline (same field set in JobManager).
+
+    Returns 202 with the job_id and the polling URL, identical
+    contract shape to POST /api/v1/analyses/<acquisition_id>.
+    """
+    cfg = _get_cfg()
+    jobs = _get_jobs()
+
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception:  # noqa: BLE001
+        body = {}
+
+    input_analysis_id = (body.get("input_analysis_id") or "").strip()
+    if not input_analysis_id:
+        return jsonify({
+            "error":   "missing_field",
+            "message": "body field 'input_analysis_id' is required",
+        }), 400
+
+    # Pattern validation + acquisition_id extraction in one shot.
+    m = _ACQ_FROM_VOL_ANALYSIS.match(input_analysis_id)
+    if not m:
+        return jsonify({
+            "error":   "malformed_analysis_id",
+            "message": (
+                f"input_analysis_id {input_analysis_id!r} does not match "
+                f"the expected pattern "
+                f"'analysis-volatility[-<preset>]-<uuid>-<UTC>-<job8>.json'. "
+                f"MISP enrichment only accepts a Volatility analysis as input."
+            ),
+        }), 400
+    acquisition_id = m.group("acq")
+
+    # Verify the Swift object exists before spawning a worker. HEAD
+    # is cheap (~1 round-trip), and the alternative (let the worker
+    # discover the missing object and fail_job) would leave a
+    # zombie 'failed' record in the dashboard for a simple typo.
+    try:
+        from forensicnova_analyzer.swift import (
+            _authenticate, _resolve_password,
+        )
+        import swiftclient
+        password = _resolve_password(None)
+        url, token = _authenticate(cfg, password)
+        swiftclient.client.head_object(
+            url=url,
+            token=token,
+            container=cfg.swift_container,
+            name=input_analysis_id,
+        )
+    except swiftclient.ClientException as exc:
+        if getattr(exc, "http_status", None) == 404:
+            return jsonify({
+                "error":   "input_analysis_not_found",
+                "message": (
+                    f"no Swift object {input_analysis_id!r} in "
+                    f"container {cfg.swift_container!r}"
+                ),
+            }), 404
+        log.exception("HEAD check on input_analysis_id failed")
+        return jsonify({"error": "internal_error", "message": str(exc)}), 500
+    except Exception as exc:  # noqa: BLE001
+        log.exception("HEAD check unexpectedly failed")
+        return jsonify({"error": "internal_error", "message": str(exc)}), 500
+
+    # Operator identity from Keystone token (same audit trail as the
+    # volatility endpoint).
+    operator = request.environ.get("HTTP_X_USER_NAME") or "anonymous"
+
+    job_id = str(uuid.uuid4())
+    jobs.create_job(
+        job_id=job_id,
+        operator=operator,
+        acquisition_id=acquisition_id,
+        analyzer="misp",
+        preset=None,
+        plugins=None,
+    )
+
+    # Lazy import to keep this endpoint cheap when the analyzer is
+    # not deployed (e.g. minimal API-only test environments).
+    from forensicnova_analyzer.jobs_runner import start_misp_enrichment_job
+    start_misp_enrichment_job(
+        cfg=cfg,
+        jobs=jobs,
+        job_id=job_id,
+        input_analysis_id=input_analysis_id,
+        operator=operator,
+    )
+
+    log.info(
+        "POST /api/v1/misp-enrichments -> 202 "
+        "(job_id=%s, input=%s, acq=%s)",
+        job_id, input_analysis_id, acquisition_id,
+    )
+    return jsonify({
+        "job_id":            job_id,
+        "acquisition_id":    acquisition_id,
+        "input_analysis_id": input_analysis_id,
+        "analyzer":          "misp",
+        "operator":          operator,
+        "status":            "pending",
+        "poll_url":          f"/api/v1/jobs/{job_id}",
+    }), 202
