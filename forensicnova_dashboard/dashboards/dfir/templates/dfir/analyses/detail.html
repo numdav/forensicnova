@@ -46,10 +46,17 @@
             </td></tr>
         <tr><th>{% trans "Operator" %}</th>
             <td>{{ analysis.operator|default:"—" }}</td></tr>
+        {% if is_misp %}
         <tr><th>{% trans "Started" %}</th>
-            <td>{{ analysis.timestamps.started_at|default:analysis.started_at|default:"—" }}</td></tr>
+            <td>{{ analysis.started_at|default:"—" }}</td></tr>
         <tr><th>{% trans "Completed" %}</th>
-            <td>{{ analysis.timestamps.completed_at|default:analysis.completed_at|default:"—" }}</td></tr>
+            <td>{{ analysis.completed_at|default:"—" }}</td></tr>
+        {% else %}
+        <tr><th>{% trans "Started" %}</th>
+            <td>{{ analysis.timestamps.started_at|default:"—" }}</td></tr>
+        <tr><th>{% trans "Completed" %}</th>
+            <td>{{ analysis.timestamps.completed_at|default:"—" }}</td></tr>
+        {% endif %}
     </table>
 
     {# ---- Analyzer config ---- #}
