@@ -30,6 +30,13 @@ LOG = logging.getLogger(__name__)
 # Tunables
 _CONNECT_TIMEOUT       = 5.0
 _READ_TIMEOUT_FAST     = 15.0    # GET /jobs, GET /acquisitions, POST /memory_acquire (returns 202 fast)
+# Detail view fetches an analysis JSON, which the backend pulls from
+# Swift (get_object) before returning. Normally a few ms, but a slow
+# Swift read or a transiently loaded VM can exceed the 15s fast bound.
+# 60s is a safety margin so the detail page does not fail on a single
+# slow moment — it is a symptom guard, not a root-cause fix (no slow
+# path is reproducible at the time of writing; see SITREP).
+_READ_TIMEOUT_DETAIL   = 60.0
 _READ_TIMEOUT_DOWNLOAD = 600.0   # streaming PDF / dump downloads
 
 # Keystone service catalog entry registered by the ForensicNova plugin
@@ -397,8 +404,15 @@ def get_analysis(request, analysis_id: str) -> dict:
     The analysis_id is the Swift object name (e.g.
     'analysis-volatility-fast-<acq>-<UTC>-<job8>.json'). Path-encoded
     automatically by requests.
+
+    Uses a longer read timeout than the other fast GETs: the backend
+    fetches the JSON from Swift before responding, so a transiently
+    slow read should not fail the detail page.
     """
-    return _get_analyzer(request, f"/api/v1/analyses/by-id/{analysis_id}")
+    return _get_analyzer(
+        request, f"/api/v1/analyses/by-id/{analysis_id}",
+        read_timeout=_READ_TIMEOUT_DETAIL,
+    )
 
 
 def trigger_analysis(
