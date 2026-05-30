@@ -81,8 +81,10 @@
         <tr><th>{% trans "OS hint" %}</th>
             <td>{{ analysis.result.os_hint|default:"—" }}</td></tr>
         {% else %}
-        <tr><th>{% trans "MISP server" %}</th>
-            <td><code>{{ analysis.misp_server.url|default:"—" }}</code></td></tr>
+        <tr><th>{% trans "Intelligence source" %}</th>
+            <td>{{ misp_intelligence_source|default:"—" }}</td></tr>
+        <tr><th>{% trans "MISP events at query" %}</th>
+            <td>{{ analysis.misp_server.events_count_at_query|default:"—" }}</td></tr>
         <tr><th>{% trans "Source analysis" %}</th>
             <td><code>{{ analysis.source.input_analysis_id|default:"—" }}</code></td></tr>
         <tr><th>{% trans "OS hint" %}</th>
@@ -263,6 +265,7 @@
         <thead><tr>
             <th>{% trans "Type" %}</th>
             <th>{% trans "IOC value" %}</th>
+            <th>{% trans "Context" %}</th>
             <th>{% trans "MISP matches" %}</th>
             <th>{% trans "Threat actors" %}</th>
             <th>{% trans "Galaxies" %}</th>
@@ -273,6 +276,7 @@
         <tr>
             <td><code>{{ ioc.ioc_type }}</code></td>
             <td><code>{{ ioc.ioc_value }}</code></td>
+            <td>{% if ioc.context %}<small>{{ ioc.context }}</small>{% else %}—{% endif %}</td>
             <td>{% if ioc.misp_match > 0 %}
                 <span style="color: red;"><strong>{{ ioc.misp_match }}</strong></span>
                 {% else %}

@@ -205,6 +205,22 @@ class DetailView(generic.TemplateView):
         ctx["misp_threat_score_reason"] = summary.get("threat_score_reason")
         ctx["misp_coherence_ok"] = bool(source.get("hashes_match_report"))
 
+        # Intelligence source: the enabled MISP feeds the IOCs were
+        # correlated against (name + provider), captured at query time.
+        # Mirrors the PDF report so the dashboard and the PDF state the
+        # same provenance. Pre-modification analyses lack the feeds field
+        # and render as "—".
+        misp_server = analysis.get("misp_server") or {}
+        feeds = misp_server.get("feeds") or []
+        enabled_feeds = [f for f in feeds if f.get("enabled")]
+        if enabled_feeds:
+            ctx["misp_intelligence_source"] = ", ".join(
+                "{} ({})".format(f.get("name") or "—", f.get("provider") or "—")
+                for f in enabled_feeds
+            )
+        else:
+            ctx["misp_intelligence_source"] = "—"
+
         # Aggregate summary block (joined lists render as plain text, in
         # keeping with the lightweight style of the rest of the table).
         ctx["misp_summary"] = {
