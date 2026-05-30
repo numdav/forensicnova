@@ -71,6 +71,7 @@ from app.reports.pdf_report import ForensicPdfReport
 from app.storage.swift_client import (
     SwiftObjectNotFound,
     download_json,
+    list_analyses,
     list_reports,
     stream_object,
 )
@@ -537,6 +538,57 @@ def _find_report_by_acquisition_id(acquisition_id: str, cfg):
         acquisition_id, len(report_names),
     )
     return None
+
+
+def _collect_analyses_for_acquisition(acquisition_id: str, cfg) -> list[dict]:
+    """Return every analysis JSON (volatility + misp) for one acquisition.
+
+    Sibling of _find_report_by_acquisition_id, but for analysis-*.json
+    objects and returning a LIST: one acquisition may carry many analyses
+    (several volatility presets and/or several misp enrichments). This is
+    the read side that feeds the combined PDF report (architecture B: the
+    acquisition backend renders the PDF and reads the analyzer's outputs
+    from the shared 'forensics' Swift container).
+
+    Matching is done on the acquisition_id field INSIDE each JSON, never on
+    the object name. Reason: the analysis_id field is formatted
+    inconsistently across analyzer types (volatility appends '.json',
+    misp does not), so the object name is not a reliable identity key; the
+    top-level acquisition_id is present and clean in both schemas.
+
+    A single unreadable/unparseable object is skipped with a warning rather
+    than aborting the whole collection — one corrupt analysis must not stop
+    the combined PDF from rendering all the others.
+
+    The list is returned UNSORTED and UNGROUPED on purpose. Presentation
+    order is the renderer's responsibility (volatility before misp,
+    chronological within each group).
+    """
+    try:
+        analysis_names = list_analyses(cfg)
+    except Exception:
+        log.exception("list_analyses failed")
+        raise
+
+    collected: list[dict] = []
+    for name in analysis_names:
+        try:
+            raw = download_json(name, cfg)
+            analysis = json.loads(raw.decode("utf-8"))
+        except SwiftObjectNotFound:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            log.warning("skipping unreadable analysis %s: %s", name, exc)
+            continue
+
+        if analysis.get("acquisition_id") == acquisition_id:
+            collected.append(analysis)
+
+    log.info(
+        "collected %d analyses for acq=%s (scanned %d objects)",
+        len(collected), acquisition_id, len(analysis_names),
+    )
+    return collected
 
 
 def _extract_object_name(swift_object_path: str) -> str:
