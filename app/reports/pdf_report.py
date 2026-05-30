@@ -645,28 +645,253 @@ def render_chain_of_custody(report):
 
 
 # ---------------------------------------------------------------------------
-# Block: analysis (placeholder for thesis)
+# Block: analysis (Volatility 3 + MISP enrichment)
 # ---------------------------------------------------------------------------
+#
+# The analysis data does NOT live inside the acquisition report. It is
+# produced separately by the analyzer backend (forensicnova_analyzer) and
+# stored as standalone analysis-*.json objects in the same Swift container.
+# The acquisition backend reads them (app/api/v1.py
+# _collect_analyses_for_acquisition) and passes the parsed list to the PDF
+# renderer, which appends one sub-section per analysis here.
+#
+# Two analyzer types, two schemas (field locations taken from REAL analyzer
+# output, never assumed):
+#   - volatility : timestamps under ``timestamps``, plugin results under
+#                  ``result.plugins`` (top-level ``plugins`` is null),
+#                  coherence under ``coherence_check``.
+#   - misp       : timestamps TOP-LEVEL (not under ``timestamps``),
+#                  coherence under ``source.hashes_match_report``,
+#                  findings under ``enrichment`` + aggregate ``summary``.
 
-def render_analysis(report):
-    """Analysis section.
 
-    Empty for the exam prototype. The thesis adds Volatility 3, YARA and
-    threat-intelligence findings under ``report['analysis']``. When that
-    key is present, this method renders it; otherwise it shows a neutral
-    'not yet performed' placeholder so the section structure is
-    consistent across reports.
+def _fmt_ts_compact(ts):
+    """ISO-8601 -> 'YYYY-MM-DD HH:MM UTC' for compact sub-section headers."""
+    if not ts or not isinstance(ts, str):
+        return '—'
+    date_part = ts[:10]
+    time_part = ts[11:16] if len(ts) >= 16 else ''
+    return f'{date_part} {time_part} UTC'.strip()
+
+
+def _coherence_text(ok):
+    """Uniform human text for a hashes_match_report flag."""
+    if ok is True:
+        return 'hashes match report'
+    if ok is False:
+        return 'HASH MISMATCH'
+    return 'unknown'
+
+
+def render_volatility(analysis):
+    """Render ONE volatility analysis as a light per-plugin summary.
+
+    Layout (approach A — summary only, no per-plugin row dumps; the full
+    rows live in the downloadable JSON):
+      - sub-header: preset + completion timestamp
+      - meta table: preset, Vol3 version, OS hint, duration, coherence
+      - summary_counts line (ok/failed/timeout/parse_error)
+      - plugin table: name | status | rows | duration | error
+
+    Reads the REAL volatility schema:
+      result.plugins{}        -> per-plugin dicts (NOT top-level 'plugins')
+      result.summary_counts   -> {ok, failed, timeout, parse_error}
+      coherence_check         -> hashes_match_report + analyzer-read hashes
+      timestamps.completed_at -> sub-header date
+    Defensive against missing keys: every field has a fallback.
+    """
+    flow = []
+
+    preset = analysis.get('preset') or '—'
+    ts = analysis.get('timestamps') or {}
+    completed = _fmt_ts_compact(ts.get('completed_at'))
+    result = analysis.get('result') or {}
+    coherence = analysis.get('coherence_check') or {}
+
+    flow.append(Paragraph(
+        f'Volatility &middot; preset &laquo;{preset}&raquo; &middot; {completed}',
+        STYLE_H2,
+    ))
+
+    # ---- meta + coherence ----
+    os_hint = result.get('os_hint')
+    vol3_version = result.get('vol3_version') or analysis.get('analyzer_version')
+    duration = result.get('duration_seconds')
+    duration_str = f'{duration} s' if isinstance(duration, (int, float)) else '—'
+    hashes_ok = coherence.get('hashes_match_report')
+
+    meta_rows = [
+        [_p('Preset',         STYLE_LABEL), _p(preset)],
+        [_p('Volatility',     STYLE_LABEL), _p_mono(vol3_version)],
+        [_p('OS hint',        STYLE_LABEL), _p(os_hint)],
+        [_p('Duration',       STYLE_LABEL), _p_mono(duration_str)],
+        [_p('Coherence',      STYLE_LABEL), _p_mono(_coherence_text(hashes_ok))],
+        [_p('Analyzer MD5',   STYLE_LABEL), _p_mono(coherence.get('analyzer_read_md5'))],
+        [_p('Analyzer SHA-1', STYLE_LABEL), _p_mono(coherence.get('analyzer_read_sha1'))],
+    ]
+    t = Table(meta_rows, colWidths=[45 * mm, 135 * mm])
+    t.setStyle(_kv_table_style())
+    flow.append(t)
+    flow.append(Spacer(1, 2 * mm))
+
+    # ---- summary_counts ----
+    sc = result.get('summary_counts') or {}
+    summary_text = (
+        f"Plugins executed: {sc.get('ok', 0)} ok, {sc.get('failed', 0)} failed, "
+        f"{sc.get('timeout', 0)} timeout, {sc.get('parse_error', 0)} parse error"
+    )
+    flow.append(Paragraph(summary_text, STYLE_MUTED))
+    flow.append(Spacer(1, 2 * mm))
+
+    # ---- plugin table ----
+    plugins = result.get('plugins') or {}
+    if not plugins:
+        flow.append(Paragraph('(no plugin results in this analysis)', STYLE_MUTED))
+        flow.append(Spacer(1, 4 * mm))
+        return flow
+
+    header = [
+        _p('Plugin',   STYLE_LABEL),
+        _p('Status',   STYLE_LABEL),
+        _p('Rows',     STYLE_LABEL),
+        _p('Duration', STYLE_LABEL),
+        _p('Error',    STYLE_LABEL),
+    ]
+    rows = [header]
+    fail_rows = []
+    for i, (name, p) in enumerate(sorted(plugins.items()), start=1):
+        status = p.get('status') or '—'
+        row_count = p.get('row_count')
+        dur = p.get('duration_seconds')
+        dur_str = f'{dur:.2f}' if isinstance(dur, (int, float)) else '—'
+        err = p.get('error_message') or ''
+        rows.append([
+            _p_mono(name),
+            _p_mono(status),
+            _p_mono(str(row_count) if row_count is not None else '—'),
+            _p_mono(dur_str),
+            _p(err, STYLE_MUTED),
+        ])
+        if status not in ('ok', None) or err:
+            fail_rows.append(i)
+
+    plugin_table = Table(
+        rows, colWidths=[60 * mm, 20 * mm, 18 * mm, 22 * mm, 60 * mm],
+    )
+    style = _coc_table_style()
+    for r in fail_rows:
+        style.add('TEXTCOLOR', (0, r), (-1, r), COLOR_FAIL)
+    plugin_table.setStyle(style)
+    flow.append(plugin_table)
+    flow.append(Spacer(1, 4 * mm))
+
+    return flow
+
+
+def render_misp(analysis):
+    """Render ONE misp enrichment analysis.
+
+    E3 scope: header + threat-score box + aggregate summary counts. The
+    per-IOC enrichment table is appended in E4. Reads the REAL misp schema:
+      started_at / completed_at    -> TOP-LEVEL (not under 'timestamps')
+      source.hashes_match_report   -> coherence
+      summary.threat_score         -> green/yellow/red
+      summary.total_iocs_*         -> aggregate counts
+      summary.unique_*             -> attribution rollups
+    """
+    flow = []
+
+    completed = _fmt_ts_compact(analysis.get('completed_at'))
+    summary = analysis.get('summary') or {}
+    source = analysis.get('source') or {}
+    score = (summary.get('threat_score') or 'unknown').lower()
+
+    flow.append(Paragraph(f'MISP enrichment &middot; {completed}', STYLE_H2))
+
+    # ---- threat score box ----
+    score_palette = {
+        'green':  (COLOR_OK_BG,   COLOR_OK,   'THREAT SCORE: GREEN'),
+        'yellow': (COLOR_WARN_BG, COLOR_WARN, 'THREAT SCORE: YELLOW'),
+        'red':    (COLOR_FAIL_BG, COLOR_FAIL, 'THREAT SCORE: RED'),
+    }
+    bg, box, label = score_palette.get(
+        score, (COLOR_WARN_BG, COLOR_WARN, 'THREAT SCORE: UNKNOWN'))
+    score_style = (
+        STYLE_BADGE_OK if score == 'green'
+        else (STYLE_BADGE_FAIL if score == 'red' else STYLE_BADGE_WARN)
+    )
+    score_box = Table(
+        [[Paragraph(label, score_style)]],
+        colWidths=[180 * mm], rowHeights=[10 * mm],
+    )
+    score_box.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), bg),
+        ('BOX',        (0, 0), (-1, -1), 0.5, box),
+        ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN',      (0, 0), (-1, -1), 'CENTER'),
+    ]))
+    flow.append(score_box)
+    reason = summary.get('threat_score_reason')
+    if reason:
+        flow.append(Paragraph(_safe(reason), STYLE_MUTED))
+    flow.append(Spacer(1, 2 * mm))
+
+    # ---- aggregate summary ----
+    hashes_ok = source.get('hashes_match_report')
+    meta_rows = [
+        [_p('Coherence',       STYLE_LABEL), _p_mono(_coherence_text(hashes_ok))],
+        [_p('IOCs extracted',  STYLE_LABEL),
+         _p_mono(str(summary.get('total_iocs_extracted', '—')))],
+        [_p('IOCs checked',    STYLE_LABEL),
+         _p_mono(str(summary.get('total_iocs_checked', '—')))],
+        [_p('IOCs with match', STYLE_LABEL),
+         _p_mono(str(summary.get('iocs_with_misp_match', '—')))],
+        [_p('IOCs filtered',   STYLE_LABEL),
+         _p_mono(str(summary.get('total_iocs_filtered', '—')))],
+    ]
+    actors = summary.get('unique_actors') or []
+    galaxies = summary.get('unique_galaxies') or []
+    attck = summary.get('unique_attck') or []
+    if actors:
+        meta_rows.append([_p('Threat actors', STYLE_LABEL), _p(', '.join(actors))])
+    if galaxies:
+        meta_rows.append([_p('Galaxies', STYLE_LABEL), _p(', '.join(galaxies))])
+    if attck:
+        meta_rows.append([_p('ATT&CK', STYLE_LABEL), _p(', '.join(attck))])
+
+    t = Table(meta_rows, colWidths=[45 * mm, 135 * mm])
+    t.setStyle(_kv_table_style())
+    flow.append(t)
+    flow.append(Spacer(1, 4 * mm))
+
+    # NOTE: the per-IOC enrichment table is appended here in E4.
+
+    return flow
+
+
+def render_analysis(report, analyses=None):
+    """Analysis section — dispatcher over the acquisition's analyses.
+
+    ``analyses`` is the list of parsed analysis-*.json dicts belonging to
+    this acquisition (app/api/v1.py _collect_analyses_for_acquisition). It
+    defaults to None so the legacy single-arg call ``render_analysis(
+    report)`` still renders (the empty-state banner).
+
+    Presentation order is decided HERE, not by the collector: Volatility
+    analyses first (the extraction), then MISP enrichments (correlation of
+    the extracted IOCs); chronological within each group.
     """
     flow = []
     flow.append(Paragraph('Analysis', STYLE_H1))
 
-    analysis = report.get('analysis')
-    if not analysis:
-        # Coloured banner identical in style to the integrity badge —
-        # but in WARN palette. Communicates: this is a known gap, not
-        # a missing field.
+    analyses = analyses or []
+
+    if not analyses:
+        # Neutral, HONEST empty state: analysis runs in a separate service
+        # and may simply not have run yet. No promises about features.
         banner = Table(
-            [[Paragraph('Analysis: not yet performed', STYLE_BADGE_WARN)]],
+            [[Paragraph('No analysis associated with this acquisition',
+                        STYLE_BADGE_WARN)]],
             colWidths=[180 * mm], rowHeights=[12 * mm],
         )
         banner.setStyle(TableStyle([
@@ -678,58 +903,43 @@ def render_analysis(report):
         flow.append(banner)
         flow.append(Spacer(1, 3 * mm))
         flow.append(Paragraph(
-            'The acquisition pipeline collected and verified the volatile '
-            'memory image. Forensic analysis (Volatility 3 IOC extraction, '
-            'YARA scanning, threat-intelligence correlation) is part of '
-            'the thesis roadmap and will be appended to the JSON report '
-            'under <font face="Courier">analysis</font>. When that section '
-            'becomes available, the timestamps below will be populated:',
+            'Forensic analysis is performed by the ForensicNova analyzer '
+            'service (Volatility 3 plugin execution and MISP IOC '
+            'enrichment) and stored as standalone analysis records in the '
+            'same evidence container. No analysis record is currently '
+            'associated with this acquisition.',
             STYLE_BODY,
         ))
-        flow.append(Spacer(1, 2 * mm))
-        rows = [
-            [_p('Analysis started',   STYLE_LABEL), _p_mono('—')],
-            [_p('Analysis completed', STYLE_LABEL), _p_mono('—')],
-            [_p('Analyst',            STYLE_LABEL), _p_mono('—')],
-            [_p('Tools / versions',   STYLE_LABEL), _p_mono('—')],
-        ]
-        t = Table(rows, colWidths=[55 * mm, 125 * mm])
-        t.setStyle(_kv_table_style())
-        flow.append(t)
         return flow
 
-    # Real analysis section (reserved for thesis): defensive renderer that
-    # accepts whatever shape ``analysis`` has and displays its top-level
-    # keys + sub-tables. Will be specialised once the thesis schema lands.
-    rows = [
-        [_p('Analysis started',   STYLE_LABEL), _p_mono(analysis.get('started_at'))],
-        [_p('Analysis completed', STYLE_LABEL), _p_mono(analysis.get('completed_at'))],
-        [_p('Analyst',            STYLE_LABEL), _p_mono(analysis.get('analyst'))],
-        [_p('Tools / versions',   STYLE_LABEL),
-         _p_mono(', '.join(analysis.get('tools', [])) if analysis.get('tools') else None)],
-    ]
-    t = Table(rows, colWidths=[55 * mm, 125 * mm])
-    t.setStyle(_kv_table_style())
-    flow.append(t)
+    # Split by analyzer type.
+    vol = [a for a in analyses if (a.get('analyzer') or '').lower() == 'volatility']
+    misp = [a for a in analyses if (a.get('analyzer') or '').lower() == 'misp']
+    other = [a for a in analyses
+             if (a.get('analyzer') or '').lower() not in ('volatility', 'misp')]
+
+    # Chronological within each group. Volatility timestamps live under
+    # timestamps.completed_at; misp timestamps are top-level.
+    vol.sort(key=lambda a: (a.get('timestamps') or {}).get('completed_at') or '')
+    misp.sort(key=lambda a: a.get('completed_at') or '')
+
+    flow.append(Paragraph(
+        f'{len(analyses)} analysis record(s) associated with this '
+        f'acquisition: {len(vol)} Volatility, {len(misp)} MISP enrichment'
+        + (f', {len(other)} other' if other else '') + '.',
+        STYLE_MUTED,
+    ))
     flow.append(Spacer(1, 3 * mm))
 
-    # Generic key-dump for everything else under 'analysis'.
-    for k, v in analysis.items():
-        if k in ('started_at', 'completed_at', 'analyst', 'tools'):
-            continue
-        flow.append(Paragraph(str(k), STYLE_H2))
-        try:
-            payload = json.dumps(v, indent=2, ensure_ascii=False)
-        except (TypeError, ValueError):
-            payload = repr(v)
-        payload_html = (
-            payload.replace('&', '&amp;')
-                   .replace('<', '&lt;').replace('>', '&gt;')
-                   .replace('\n', '<br/>')
-                   .replace(' ', '&nbsp;')
-        )
-        flow.append(Paragraph(payload_html, STYLE_MONO))
-        flow.append(Spacer(1, 2 * mm))
+    if vol:
+        flow.append(Paragraph('Volatility analyses', STYLE_H1))
+        for a in vol:
+            flow.extend(render_volatility(a))
+
+    if misp:
+        flow.append(Paragraph('MISP enrichment', STYLE_H1))
+        for a in misp:
+            flow.extend(render_misp(a))
 
     return flow
 
@@ -913,12 +1123,20 @@ class ForensicPdfReport:
     Usage::
 
         pdf_bytes = ForensicPdfReport(report_dict).render()
+        pdf_bytes = ForensicPdfReport(report_dict, analyses=[...]).render()
+
+    ``analyses`` is the optional list of parsed analysis-*.json dicts
+    (volatility + misp) belonging to this acquisition. When omitted, the
+    Analysis section renders its neutral empty-state banner; when present,
+    it renders one sub-section per analysis. Kept optional so existing
+    single-argument callers are unaffected.
     """
 
-    def __init__(self, report: dict):
+    def __init__(self, report: dict, analyses: list | None = None):
         if not isinstance(report, dict):
             raise TypeError("report must be a dict (the v1.1 JSON report)")
         self.report = report
+        self.analyses = analyses or []
 
     def render(self) -> bytes:
         report = self.report
@@ -949,7 +1167,7 @@ class ForensicPdfReport:
         story.append(Spacer(1, 4 * mm))
         story.extend(render_chain_of_custody(report))
         story.append(Spacer(1, 4 * mm))
-        story.extend(render_analysis(report))
+        story.extend(render_analysis(report, self.analyses))
         story.append(PageBreak())
         story.extend(render_disclaimer())
 
