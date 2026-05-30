@@ -70,7 +70,12 @@ Progress reporting:
 
 Read operations:
   - list_reports()    : enumerate report-*.json in the main container.
+  - list_analyses()    : enumerate analysis-*.json in the main container
+                         (volatility + misp analyzer outputs). Same
+                         mechanics as list_reports(), different prefix.
   - download_json()    : fetch a small JSON object as bytes (full load).
+                         Prefix-agnostic: already serves analysis-*.json
+                         objects unchanged.
   - stream_object()    : yield chunks from a Swift object (any size).
                          For SLO objects, Swift transparently re-assembles
                          the segments and the analyst sees a single stream.
@@ -105,6 +110,15 @@ _PASSWORD_ENV = "FORENSICNOVA_DFIR_PASSWORD"
 # Prefix used for JSON report objects in Swift — must stay in sync with the
 # naming convention enforced by app/api/v1.py:memory_acquire().
 REPORT_OBJECT_PREFIX = "report-"
+
+# Prefix used for analysis result objects in Swift, written by the analyzer
+# backend (forensicnova_analyzer). Covers both volatility and misp outputs:
+#   analysis-volatility-<preset>-<acq>-<UTC>-<job8>.json
+#   analysis-misp-<acq>-<UTC>-<job8>.json
+# The acquisition backend only READS these (for the combined PDF report);
+# it never writes them. Kept here, not in app/api, so the naming stays in
+# one place alongside REPORT_OBJECT_PREFIX.
+ANALYSIS_OBJECT_PREFIX = "analysis-"
 
 # Download chunk size — 1 MB is a sweet spot for HTTP streaming.
 _STREAM_CHUNK_SIZE = 1024 * 1024
@@ -295,6 +309,55 @@ def list_reports(
         if obj.get("name", "").endswith(".json")
     ]
     log.info("list_reports: found %d report objects in %s", len(names), container)
+    return sorted(names)
+
+
+def list_analyses(
+    cfg,
+    password: Optional[str] = None,
+) -> list[str]:
+    """Enumerate analysis result objects (analysis-*.json) in the container.
+
+    Sibling of list_reports(): identical Keystone auth and container, only
+    the object-name prefix differs (ANALYSIS_OBJECT_PREFIX). Returns the
+    object names of every volatility and misp analysis result currently
+    stored in the forensics container, sorted ascending.
+
+    The acquisition backend uses this to locate the analyses belonging to
+    an acquisition (matched downstream by the acquisition_id field INSIDE
+    each JSON, not by the object name) when building the combined PDF
+    report. This module only lists/reads analyses; it never writes them —
+    the analyzer backend owns their creation.
+
+    Empty list (not an error) if the container does not exist yet.
+    """
+    password = _resolve_password(password)
+    container = cfg.swift_container
+
+    url, token = _authenticate(cfg, password)
+
+    log.debug("listing container %s with prefix=%r", container, ANALYSIS_OBJECT_PREFIX)
+
+    try:
+        _headers, objects = swiftclient.client.get_container(
+            url=url,
+            token=token,
+            container=container,
+            prefix=ANALYSIS_OBJECT_PREFIX,
+            full_listing=True,
+        )
+    except swiftclient.exceptions.ClientException as exc:
+        if getattr(exc, "http_status", None) == 404:
+            log.warning("container %s does not exist yet", container)
+            return []
+        raise
+
+    names = [
+        obj["name"]
+        for obj in objects
+        if obj.get("name", "").endswith(".json")
+    ]
+    log.info("list_analyses: found %d analysis objects in %s", len(names), container)
     return sorted(names)
 
 
