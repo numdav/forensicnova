@@ -876,35 +876,50 @@ def render_misp(analysis):
             'type':     entry.get('ioc_type') or '—',
             'value':    entry.get('ioc_value') or '—',
             'match':    entry.get('misp_match') or 0,
-            'actors':   ', '.join(sorted(actors)) if actors else '—',
-            'galaxies': ', '.join(sorted(galaxies)) if galaxies else '—',
+            'actors':   sorted(actors),
+            'galaxies': sorted(galaxies),
+            # Provenance of the IOC inside the dump (origin plugin +
+            # identifiers), e.g. "ForeignAddr:4444 from PID 1234". Set by
+            # the analyzer's per-plugin extractors. High value for an
+            # analyst: it says WHERE in memory the IOC was seen.
+            'context':  entry.get('context') or '—',
         })
 
     # Matched IOCs first (descending MISP match count).
     ioc_rows.sort(key=lambda r: -(r['match'] or 0))
 
     header = [
-        _p('Type',     STYLE_LABEL),
-        _p('Value',    STYLE_LABEL),
-        _p('Match',    STYLE_LABEL),
-        _p('Actors',   STYLE_LABEL),
-        _p('Galaxies', STYLE_LABEL),
+        _p('Type',        STYLE_LABEL),
+        _p('Value',       STYLE_LABEL),
+        _p('Match',       STYLE_LABEL),
+        _p('Attribution', STYLE_LABEL),
+        _p('Context',     STYLE_LABEL),
     ]
     rows = [header]
     match_rows = []  # row indices with at least one MISP hit (flag in red)
     for i, r in enumerate(ioc_rows, start=1):
+        # Attribution combines the threat actor(s) and the MISP galaxy /
+        # cluster name(s) — "who" over "what" — on two lines to keep them
+        # distinguishable while saving a column for Context.
+        attribution_parts = []
+        if r['actors']:
+            attribution_parts.append(', '.join(r['actors']))
+        if r['galaxies']:
+            attribution_parts.append(', '.join(r['galaxies']))
+        attribution = '<br/>'.join(attribution_parts) if attribution_parts else '—'
+
         rows.append([
             _p_mono(r['type']),
             _p_mono(r['value']),
             _p_mono(str(r['match'])),
-            _p(r['actors'], STYLE_BODY),
-            _p(r['galaxies'], STYLE_BODY),
+            _p(attribution, STYLE_BODY),
+            _p(r['context'], STYLE_MUTED),
         ])
         if r['match']:
             match_rows.append(i)
 
     ioc_table = Table(
-        rows, colWidths=[20 * mm, 58 * mm, 14 * mm, 40 * mm, 48 * mm],
+        rows, colWidths=[18 * mm, 50 * mm, 12 * mm, 48 * mm, 52 * mm],
     )
     style = _coc_table_style()
     # Highlight rows that matched MISP — the IOCs an analyst acts on first.
