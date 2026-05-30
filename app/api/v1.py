@@ -481,8 +481,23 @@ def download_acquisition_report_pdf(acquisition_id: str):
     else:
         pdf_filename = json_filename + ".pdf"
 
+    # Gather this acquisition's analyses (volatility + misp) for the
+    # combined PDF. Best-effort: if collection fails (e.g. a transient
+    # Swift issue), fall back to an acquisition-only PDF rather than
+    # failing the whole request — the forensic acquisition document must
+    # always be producible; the analysis sections are an enrichment.
     try:
-        pdf_bytes = ForensicPdfReport(report).render()
+        analyses = _collect_analyses_for_acquisition(acquisition_id, cfg)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "could not collect analyses for acq=%s (%s); "
+            "rendering acquisition-only PDF",
+            acquisition_id, exc,
+        )
+        analyses = []
+
+    try:
+        pdf_bytes = ForensicPdfReport(report, analyses=analyses).render()
     except Exception as exc:
         log.exception("PDF rendering failed for acq=%s", acquisition_id)
         return jsonify(
@@ -492,8 +507,8 @@ def download_acquisition_report_pdf(acquisition_id: str):
         ), 500
 
     log.info(
-        "download_pdf: served %s (%d bytes) to operator=%s",
-        pdf_filename, len(pdf_bytes), operator,
+        "download_pdf: served %s (%d bytes, %d analyses) to operator=%s",
+        pdf_filename, len(pdf_bytes), len(analyses), operator,
     )
 
     return Response(
