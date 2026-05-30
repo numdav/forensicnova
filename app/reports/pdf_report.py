@@ -835,7 +835,85 @@ def render_misp(analysis):
     flow.append(t)
     flow.append(Spacer(1, 4 * mm))
 
-    # NOTE: the per-IOC enrichment table is appended here in E4.
+    # ---- per-IOC enrichment table ----
+    # One row per extracted IOC. Field extraction mirrors the Horizon
+    # dashboard's _build_misp_context (the authoritative reading of the
+    # enrichment schema): from each entry we take ioc_type / ioc_value /
+    # misp_match, and we roll up actors and galaxies seen across that IOC's
+    # MISP events. actor_hint (heuristic) is shown with a trailing '?' to
+    # distinguish it from structured attribution. Matched IOCs first.
+    enrichment = analysis.get('enrichment') or []
+    flow.append(Paragraph(
+        f'Indicators of Compromise ({len(enrichment)})', STYLE_H2,
+    ))
+
+    if not enrichment:
+        flow.append(Paragraph(
+            '(no IOCs extracted from this dump)', STYLE_MUTED,
+        ))
+        flow.append(Spacer(1, 4 * mm))
+        return flow
+
+    ioc_rows = []
+    for entry in enrichment:
+        events = entry.get('events') or []
+        actors = set()
+        galaxies = set()
+        for ev in events:
+            attribution = ev.get('attribution') or {}
+            actor = attribution.get('actor')
+            if actor:
+                actors.add(actor)
+            else:
+                hint = attribution.get('actor_hint')
+                if hint:
+                    actors.add(f'{hint}?')
+            for g in (ev.get('galaxies') or []):
+                gv = g.get('value')
+                if gv:
+                    galaxies.add(gv)
+        ioc_rows.append({
+            'type':     entry.get('ioc_type') or '—',
+            'value':    entry.get('ioc_value') or '—',
+            'match':    entry.get('misp_match') or 0,
+            'actors':   ', '.join(sorted(actors)) if actors else '—',
+            'galaxies': ', '.join(sorted(galaxies)) if galaxies else '—',
+        })
+
+    # Matched IOCs first (descending MISP match count).
+    ioc_rows.sort(key=lambda r: -(r['match'] or 0))
+
+    header = [
+        _p('Type',     STYLE_LABEL),
+        _p('Value',    STYLE_LABEL),
+        _p('Match',    STYLE_LABEL),
+        _p('Actors',   STYLE_LABEL),
+        _p('Galaxies', STYLE_LABEL),
+    ]
+    rows = [header]
+    match_rows = []  # row indices with at least one MISP hit (flag in red)
+    for i, r in enumerate(ioc_rows, start=1):
+        rows.append([
+            _p_mono(r['type']),
+            _p_mono(r['value']),
+            _p_mono(str(r['match'])),
+            _p(r['actors'], STYLE_BODY),
+            _p(r['galaxies'], STYLE_BODY),
+        ])
+        if r['match']:
+            match_rows.append(i)
+
+    ioc_table = Table(
+        rows, colWidths=[20 * mm, 58 * mm, 14 * mm, 40 * mm, 48 * mm],
+    )
+    style = _coc_table_style()
+    # Highlight rows that matched MISP — the IOCs an analyst acts on first.
+    for r in match_rows:
+        style.add('TEXTCOLOR', (0, r), (-1, r), COLOR_FAIL)
+        style.add('FONT',      (0, r), (0, r), 'Helvetica-Bold', 8.5)
+    ioc_table.setStyle(style)
+    flow.append(ioc_table)
+    flow.append(Spacer(1, 4 * mm))
 
     return flow
 
