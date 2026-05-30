@@ -808,8 +808,18 @@ def render_misp(analysis):
     flow.append(Spacer(1, 2 * mm))
 
     # ---- aggregate summary ----
+    # MISP source first: which intel database the IOCs were correlated
+    # against, and how many events it held at query time. This is the
+    # provenance/trust context for every match below — a correlation is
+    # only as meaningful as the knowledge base behind it.
     hashes_ok = source.get('hashes_match_report')
+    misp_server = analysis.get('misp_server') or {}
+    events_at_query = misp_server.get('events_count_at_query')
     meta_rows = [
+        [_p('MISP server',          STYLE_LABEL), _p_mono(misp_server.get('url'))],
+        [_p('MISP events at query', STYLE_LABEL),
+         _p_mono(f'{events_at_query:,}' if isinstance(events_at_query, int)
+                 else '—')],
         [_p('Coherence',       STYLE_LABEL), _p_mono(_coherence_text(hashes_ok))],
         [_p('IOCs extracted',  STYLE_LABEL),
          _p_mono(str(summary.get('total_iocs_extracted', '—')))],
