@@ -514,6 +514,30 @@ class MispEnricher:
         except Exception as exc:
             log.warning("could not fetch MISP server event count: %s", exc)
 
+        # Threat-intel provenance: which feeds populate this MISP instance.
+        # Captured at query time so the JSON/PDF can state the intelligence
+        # source(s) the IOCs were correlated against (e.g. "CIRCL OSINT
+        # Feed") rather than just the local server URL. Best-effort: a
+        # failure here must never abort the enrichment.
+        try:
+            feeds_raw = self._misp.feeds(pythonify=False)
+            feeds = []
+            if isinstance(feeds_raw, list):
+                for f in feeds_raw:
+                    fd = f.get("Feed", f) if isinstance(f, dict) else {}
+                    if not fd:
+                        continue
+                    feeds.append({
+                        "name":            fd.get("name"),
+                        "provider":        fd.get("provider"),
+                        "url":             fd.get("url"),
+                        "enabled":         fd.get("enabled"),
+                        "caching_enabled": fd.get("caching_enabled"),
+                    })
+            misp_server_info["feeds"] = feeds
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not fetch MISP feeds: %s", exc)
+
         completed_at = datetime.now(timezone.utc)
         duration = (completed_at - started_at).total_seconds()
 

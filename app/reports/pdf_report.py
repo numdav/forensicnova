@@ -808,15 +808,26 @@ def render_misp(analysis):
     flow.append(Spacer(1, 2 * mm))
 
     # ---- aggregate summary ----
-    # MISP source first: which intel database the IOCs were correlated
-    # against, and how many events it held at query time. This is the
-    # provenance/trust context for every match below — a correlation is
-    # only as meaningful as the knowledge base behind it.
+    # Intelligence source first: which threat-intel feeds the IOCs were
+    # correlated against (name + provider), and how many events the MISP
+    # instance held at query time. This is the provenance/trust context
+    # for every match below — a correlation is only as meaningful as the
+    # sources behind it. We surface the enabled feeds rather than the raw
+    # local server URL (what matters is WHICH intel fed the database).
     hashes_ok = source.get('hashes_match_report')
     misp_server = analysis.get('misp_server') or {}
     events_at_query = misp_server.get('events_count_at_query')
+    feeds = misp_server.get('feeds') or []
+    enabled_feeds = [f for f in feeds if f.get('enabled')]
+    if enabled_feeds:
+        source_text = ', '.join(
+            f"{f.get('name') or '—'} ({f.get('provider') or '—'})"
+            for f in enabled_feeds
+        )
+    else:
+        source_text = '—'
     meta_rows = [
-        [_p('MISP server',          STYLE_LABEL), _p_mono(misp_server.get('url'))],
+        [_p('Intelligence source',  STYLE_LABEL), _p(source_text)],
         [_p('MISP events at query', STYLE_LABEL),
          _p_mono(f'{events_at_query:,}' if isinstance(events_at_query, int)
                  else '—')],
