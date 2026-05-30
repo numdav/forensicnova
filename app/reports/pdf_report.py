@@ -41,7 +41,6 @@ Defensive rendering
 
 from datetime import datetime, timezone
 from io import BytesIO
-import json
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -552,10 +551,11 @@ def _fmt_gb(n):
 def render_chain_of_custody(report):
     """Numbered, timestamped event timeline.
 
-    Long event payloads ('data') would not fit cleanly inside cells, so
-    the table shows seq/timestamp/event/description and a separate small
-    paragraph below the row dumps the JSON payload pretty-printed in
-    monospace. Failed events are flagged in red.
+    Renders a compact summary table (seq / timestamp / event / description);
+    failed events are flagged in red. The per-event JSON 'data' payloads are
+    intentionally NOT rendered: they duplicate information already shown in
+    the Evidence and hashes tables, and the complete record is available in
+    the downloadable JSON report (the canonical artifact for SIEM ingest).
     """
     flow = []
     flow.append(Paragraph('Chain of custody', STYLE_H1))
@@ -584,8 +584,7 @@ def render_chain_of_custody(report):
     ]
     rows = [header]
 
-    failure_rows = []  # (table_row_index, payload_json_str) for red coloring
-    detail_blocks = []  # collected after the table — 'data' payloads pretty-printed
+    failure_rows = []  # row indices to flag in red (failed / integrity_failure)
 
     for i, ev in enumerate(events, start=1):
         seq        = ev.get('seq') or i
@@ -605,12 +604,6 @@ def render_chain_of_custody(report):
         if 'failed' in ev_type or 'integrity_failure' in ev_type:
             failure_rows.append(i)  # row index in the table (1-based, since header is row 0)
 
-        # Keep a compact data dump for events that have a payload —
-        # only show those whose data is non-trivial to avoid noise.
-        data = ev.get('data')
-        if data:
-            detail_blocks.append((seq, ev_type, data))
-
     coc_table = Table(rows, colWidths=[10 * mm, 25 * mm, 55 * mm, 90 * mm])
     style = _coc_table_style()
     for r in failure_rows:
@@ -618,28 +611,6 @@ def render_chain_of_custody(report):
         style.add('FONT',      (0, r), (-1, r), 'Helvetica-Bold', 8.5)
     coc_table.setStyle(style)
     flow.append(coc_table)
-
-    # ---- Per-event payloads ----
-    if detail_blocks:
-        flow.append(Spacer(1, 6 * mm))
-        flow.append(Paragraph('Event payloads', STYLE_H2))
-        for seq, ev_type, data in detail_blocks:
-            try:
-                payload = json.dumps(data, indent=2, ensure_ascii=False)
-            except (TypeError, ValueError):
-                payload = repr(data)
-            payload_html = (
-                payload.replace('&', '&amp;')
-                       .replace('<', '&lt;').replace('>', '&gt;')
-                       .replace('\n', '<br/>')
-                       .replace(' ', '&nbsp;')
-            )
-            flow.append(Paragraph(
-                f"<b>#{seq:02d}</b> &mdash; <font face='Courier'>{ev_type}</font>",
-                STYLE_BODY,
-            ))
-            flow.append(Paragraph(payload_html, STYLE_MONO))
-            flow.append(Spacer(1, 2 * mm))
 
     return flow
 
