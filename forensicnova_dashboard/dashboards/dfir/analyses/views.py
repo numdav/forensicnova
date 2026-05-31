@@ -244,6 +244,7 @@ class DetailView(generic.TemplateView):
             events = entry.get("events") or []
             actors = set()
             galaxies = set()
+            sources = set()
             event_infos = []
             for ev in events:
                 a = (ev.get("attribution") or {}).get("actor")
@@ -258,6 +259,13 @@ class DetailView(generic.TemplateView):
                     v = g.get("value")
                     if v:
                         galaxies.add(v)
+                # Per-IOC source: the org that created the matched event
+                # (Orgc) — the feed provider (e.g. CIRCL) for feed-imported
+                # events. WHICH source flagged THIS match, distinct from the
+                # threat actor behind it. Mirrors the PDF "src:" line.
+                org = ev.get("org")
+                if org:
+                    sources.add(org)
                 if ev.get("info"):
                     event_infos.append(ev["info"])
             iocs.append({
@@ -267,6 +275,7 @@ class DetailView(generic.TemplateView):
                 "misp_match": entry.get("misp_match") or 0,
                 "actors":     ", ".join(sorted(actors)),
                 "galaxies":   ", ".join(sorted(galaxies)),
+                "source":     ", ".join(sorted(sources)),
                 "event_info": "; ".join(event_infos[:3]),
             })
         iocs.sort(key=lambda x: -(x.get("misp_match") or 0))

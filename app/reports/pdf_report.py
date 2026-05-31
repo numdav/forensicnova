@@ -880,6 +880,7 @@ def render_misp(analysis):
         events = entry.get('events') or []
         actors = set()
         galaxies = set()
+        sources = set()
         for ev in events:
             attribution = ev.get('attribution') or {}
             actor = attribution.get('actor')
@@ -893,12 +894,20 @@ def render_misp(analysis):
                 gv = g.get('value')
                 if gv:
                     galaxies.add(gv)
+            # Per-IOC source: the organisation that created the matched
+            # event (Orgc). For feed-imported events this is the feed
+            # provider (e.g. CIRCL) — i.e. WHICH source flagged THIS match,
+            # distinct from the threat actor behind it.
+            org = ev.get('org')
+            if org:
+                sources.add(org)
         ioc_rows.append({
             'type':     entry.get('ioc_type') or '—',
             'value':    entry.get('ioc_value') or '—',
             'match':    entry.get('misp_match') or 0,
             'actors':   sorted(actors),
             'galaxies': sorted(galaxies),
+            'sources':  sorted(sources),
             # Provenance of the IOC inside the dump (origin plugin +
             # identifiers), e.g. "ForeignAddr:4444 from PID 1234". Set by
             # the analyzer's per-plugin extractors. High value for an
@@ -919,14 +928,18 @@ def render_misp(analysis):
     rows = [header]
     match_rows = []  # row indices with at least one MISP hit (flag in red)
     for i, r in enumerate(ioc_rows, start=1):
-        # Attribution combines the threat actor(s) and the MISP galaxy /
-        # cluster name(s) — "who" over "what" — on two lines to keep them
-        # distinguishable while saving a column for Context.
+        # Attribution combines the threat actor(s), the MISP galaxy /
+        # cluster name(s) — "who" over "what" — and a final "src:" line
+        # naming the source(s) that flagged the match (the creating org,
+        # i.e. the feed provider for feed-imported events). Kept on
+        # separate lines to stay readable inside one column.
         attribution_parts = []
         if r['actors']:
             attribution_parts.append(', '.join(r['actors']))
         if r['galaxies']:
             attribution_parts.append(', '.join(r['galaxies']))
+        if r['sources']:
+            attribution_parts.append('<i>src: ' + ', '.join(r['sources']) + '</i>')
         attribution = '<br/>'.join(attribution_parts) if attribution_parts else '—'
 
         rows.append([

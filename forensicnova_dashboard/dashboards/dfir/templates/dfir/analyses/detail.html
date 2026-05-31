@@ -269,6 +269,7 @@
             <th>{% trans "MISP matches" %}</th>
             <th>{% trans "Threat actors" %}</th>
             <th>{% trans "Galaxies" %}</th>
+            <th>{% trans "Source" %}</th>
             <th>{% trans "Sample event(s)" %}</th>
         </tr></thead>
         <tbody>
@@ -285,6 +286,7 @@
             </td>
             <td>{% if ioc.actors %}{{ ioc.actors }}{% else %}—{% endif %}</td>
             <td>{% if ioc.galaxies %}{{ ioc.galaxies }}{% else %}—{% endif %}</td>
+            <td>{% if ioc.source %}{{ ioc.source }}{% else %}—{% endif %}</td>
             <td>{% if ioc.event_info %}<small>{{ ioc.event_info }}</small>{% else %}—{% endif %}</td>
         </tr>
         {% endfor %}
