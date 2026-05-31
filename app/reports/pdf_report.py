@@ -236,7 +236,7 @@ def render_cover(report, generated_at):
     flow = []
 
     flow.append(Paragraph('ForensicNova', STYLE_TITLE))
-    flow.append(Paragraph('Volatile memory acquisition report', STYLE_SUBTITLE))
+    flow.append(Paragraph('Volatile memory forensic report', STYLE_SUBTITLE))
     flow.append(HRFlowable(width='100%', thickness=0.6, color=COLOR_RULE,
                            spaceBefore=0, spaceAfter=4 * mm))
 
@@ -1170,7 +1170,7 @@ class _NumberedCanvas(Canvas):
         self.setFont('Helvetica', 8)
         self.setFillColor(COLOR_MUTED)
         self.drawString(margin_x + 30 * mm, page_h - 9 * mm,
-                        'volatile memory acquisition report')
+                        'volatile memory forensic report')
 
         # Top-right: operator
         self.setFont('Helvetica', 8)
@@ -1252,7 +1252,7 @@ class ForensicPdfReport:
             rightMargin=15 * mm,
             title=f'ForensicNova report - {acquisition_id}',
             author=operator,
-            subject='Volatile memory acquisition - forensic report',
+            subject='Volatile memory forensic report',
             creator='ForensicNova',
         )
 
