@@ -121,8 +121,8 @@
             <td>{{ analysis.coherence_check.analyzer_size_bytes|default:"—" }}</td></tr>
     </table>
     {% else %}
-    {# MISP does not touch the dump: it validates the source analysis'
-       own coherence flag rather than re-hashing. #}
+    {% comment %} MISP does not touch the dump: it validates the source analysis'
+       own coherence flag rather than re-hashing. {% endcomment %}
     {% if misp_coherence_ok %}
         <div class="alert alert-success">
             <span class="fa fa-check"></span>
@@ -209,8 +209,8 @@
     {# ---- MISP: threat score box + summary + IOC table ---- #}
     {% if is_misp %}
 
-    {# Threat score box — the misp analogue of the coherence PASS/FAIL
-       banner, same alert styling, colour keyed to the score. #}
+    {% comment %} Threat score box — the misp analogue of the coherence PASS/FAIL
+       banner, same alert styling, colour keyed to the score. {% endcomment %}
     <h3>{% trans "Threat score" %}</h3>
     {% if misp_threat_score == "red" %}
         <div class="alert alert-danger">
@@ -253,8 +253,8 @@
             <td>{{ misp_summary.unique_attck|default:"—" }}</td></tr>
     </table>
 
-    {# Main table — one row per enriched IOC (analogue of the plugin
-       table). Matched IOCs are listed first. #}
+    {% comment %} Main table — one row per enriched IOC (analogue of the plugin
+       table). Matched IOCs are listed first. {% endcomment %}
     <h3>{% trans "IOC enrichment" %}
         ({{ misp_summary.iocs_with_misp_match|default:0 }}
         {% trans "matched" %} / {{ misp_summary.total_iocs_checked|default:0 }}
