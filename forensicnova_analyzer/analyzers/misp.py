@@ -879,6 +879,30 @@ class MispEnricher:
 
         return out
 
+    @staticmethod
+    def _canonical_galaxy_kind(g: dict) -> str:
+        """Canonical high-risk KIND label for a galaxy entry.
+
+        MISP exposes a galaxy under a machine type (e.g. 'mitre-tool',
+        'threat-actor') AND a human name (e.g. 'Tool', 'Threat Actor').
+        HIGH_RISK_GALAXY_PREFIXES are written against the human names, so
+        we normalise EITHER identifier to the canonical label here. This
+        lets R1 fire on real MISP galaxies (structured clusters OR
+        misp-galaxy:* tags, whose predicate is the machine type), instead
+        of only on strings that already happen to be in 'Name:value'
+        form. Returns '' for kinds we do not treat as high-risk.
+        """
+        ident = f"{g.get('type') or ''}|{g.get('name') or ''}".lower()
+        if "threat-actor" in ident or "threat actor" in ident:
+            return "Threat Actor"
+        if "intrusion-set" in ident or "intrusion set" in ident:
+            return "Intrusion Set"
+        if "malware" in ident:
+            return "Malware"
+        if "tool" in ident:
+            return "Tool"
+        return ""
+
     def _compute_threat_score(self, enrichment: list,
                               injection_signals: dict) -> tuple:
         """Deterministic threat score: returns (score, reason).
@@ -910,17 +934,23 @@ class MispEnricher:
         # --- Pre-compute aggregates we need across rules ---
         total_matches = sum(e.get("misp_match", 0) for e in enrichment)
 
-        # Collect all "<type>:<value>" strings from every event's
-        # galaxies (structured + tag-form), so we can test against
-        # HIGH_RISK_GALAXY_PREFIXES uniformly.
+        # Build "<kind>:<value>" strings for the high-risk test. MISP
+        # galaxies arrive with a machine type ('mitre-tool') and a human
+        # name ('Tool'); HIGH_RISK_GALAXY_PREFIXES are written against the
+        # human names, so we normalise via _canonical_galaxy_kind. Only
+        # galaxies of a high-risk KIND yield a string here (others could
+        # never match a prefix anyway). NOTE: the galaxy strings DISPLAYED
+        # elsewhere (summary unique_galaxies, dashboard, PDF) are built
+        # separately and intentionally LEFT UNCHANGED — this normalisation
+        # is local to the R1 comparison only.
         galaxy_strs = []
         for e in enrichment:
             for evt in e.get("events", []):
                 for g in evt.get("galaxies", []):
-                    t = g.get("type") or g.get("name") or ""
                     v = g.get("value") or ""
-                    if t and v:
-                        galaxy_strs.append(f"{t}:{v}")
+                    kind = self._canonical_galaxy_kind(g)
+                    if kind and v:
+                        galaxy_strs.append(f"{kind}:{v}")
 
         # --- R1: high-risk galaxy match ---
         for gs in galaxy_strs:
