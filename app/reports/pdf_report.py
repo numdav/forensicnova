@@ -39,6 +39,7 @@ Defensive rendering
   libvirt`` blocks individually but always tolerant of missing keys.
 """
 
+import re
 from datetime import datetime, timezone
 from io import BytesIO
 
@@ -108,6 +109,12 @@ STYLE_MUTED = ParagraphStyle(
 STYLE_MONO = ParagraphStyle(
     name='fn_mono', fontName='Courier',
     fontSize=8.5, leading=11, textColor=COLOR_INK,
+)
+# Same as STYLE_MONO but breaks long unbreakable tokens (URLs, file hashes)
+# at the column edge instead of overflowing or wrapping at an odd point.
+# Used for the IOC "Value" cell, which may hold a long URL or sha256.
+STYLE_MONO_WRAP = ParagraphStyle(
+    name='fn_mono_wrap', parent=STYLE_MONO, wordWrap='CJK',
 )
 STYLE_LABEL = ParagraphStyle(
     name='fn_label', fontName='Helvetica-Bold',
@@ -211,6 +218,13 @@ def _p(text, style=STYLE_BODY):
 
 def _p_mono(text):
     return Paragraph(_safe(text), STYLE_MONO)
+
+
+def _tcode(value):
+    """Extract a MITRE ATT&CK technique id (e.g. 'T1071', 'T1553.002')
+    from a galaxy cluster value, or '' if none is present."""
+    mt = re.search(r'T\d{4}(?:\.\d+)?', value or '')
+    return mt.group(0) if mt else ''
 
 
 def _strip_container(swift_path):
@@ -929,13 +943,39 @@ def render_misp(analysis):
     ]
     actors = summary.get('unique_actors') or []
     galaxies = summary.get('unique_galaxies') or []
-    attck = summary.get('unique_attck') or []
+    # Break the raw "type:value" galaxy list into readable, non-redundant
+    # groups instead of one comma wall (the old single 'Galaxies' row
+    # duplicated the actor and the techniques shown in their own rows).
+    # Tools get their own row; techniques are rendered "Name (code)" so this
+    # row doubles as the legend for the short codes used in the IOC table.
+    tool_names = []
+    techniques = []  # (sort_key, "Name (code)")
+    for g in galaxies:
+        gtype, _, gval = g.partition(':')
+        gtype = gtype.lower()
+        if not gval:
+            continue
+        if 'tool' in gtype:
+            name = gval.split(' - ')[0].strip()
+            if name not in tool_names:
+                tool_names.append(name)
+        elif 'attack-pattern' in gtype:
+            code = _tcode(gval)
+            name = re.sub(r'\s*-\s*T\d{4}(?:\.\d+)?\s*$', '', gval).strip()
+            label = f'{name} ({code})' if code else name
+            pair = (code or label, label)
+            if pair not in techniques:
+                techniques.append(pair)
+    techniques.sort(key=lambda x: x[0])
     if actors:
-        meta_rows.append([_p('Threat actors', STYLE_LABEL), _p(', '.join(actors))])
-    if galaxies:
-        meta_rows.append([_p('Galaxies', STYLE_LABEL), _p(', '.join(galaxies))])
-    if attck:
-        meta_rows.append([_p('ATT&CK', STYLE_LABEL), _p(', '.join(attck))])
+        meta_rows.append([_p('Threat actors', STYLE_LABEL),
+                          _p(', '.join(actors))])
+    if tool_names:
+        meta_rows.append([_p('Tools', STYLE_LABEL),
+                          _p(', '.join(sorted(tool_names)))])
+    if techniques:
+        meta_rows.append([_p('ATT&amp;CK techniques', STYLE_LABEL),
+                          _p(', '.join(lbl for _key, lbl in techniques))])
 
     t = Table(meta_rows, colWidths=[45 * mm, 135 * mm])
     t.setStyle(_kv_table_style())
@@ -965,7 +1005,8 @@ def render_misp(analysis):
     for entry in enrichment:
         events = entry.get('events') or []
         actors = set()
-        galaxies = set()
+        tools = set()
+        attck = set()
         sources = set()
         for ev in events:
             attribution = ev.get('attribution') or {}
@@ -978,8 +1019,19 @@ def render_misp(analysis):
                     actors.add(f'{hint}?')
             for g in (ev.get('galaxies') or []):
                 gv = g.get('value')
-                if gv:
-                    galaxies.add(gv)
+                if not gv:
+                    continue
+                gtype = (g.get('type') or '').lower()
+                if 'attack-pattern' in gtype:
+                    # technique -> short ATT&CK code for the table; the full
+                    # name is shown once in the section's ATT&CK legend row
+                    code = g.get('attck_id') or _tcode(gv)
+                    if code:
+                        attck.add(code)
+                elif 'tool' in gtype:
+                    tools.add(gv.split(' - ')[0].strip())
+                # threat-actor / intrusion-set values are already captured
+                # via attribution.actor above -> not repeated here
             # Per-IOC source: the organisation that created the matched
             # event (Orgc). For feed-imported events this is the feed
             # provider (e.g. CIRCL) — i.e. WHICH source flagged THIS match,
@@ -992,7 +1044,8 @@ def render_misp(analysis):
             'value':    entry.get('ioc_value') or '—',
             'match':    entry.get('misp_match') or 0,
             'actors':   sorted(actors),
-            'galaxies': sorted(galaxies),
+            'tools':    sorted(tools),
+            'attck':    sorted(attck),
             'sources':  sorted(sources),
             # Provenance of the IOC inside the dump (origin plugin +
             # identifiers), e.g. "ForeignAddr:4444 from PID 1234". Set by
@@ -1013,18 +1066,20 @@ def render_misp(analysis):
     ]
     rows = [header]
     for r in ioc_rows:
-        # Attribution combines the threat actor(s), the MISP galaxy /
-        # cluster name(s) — "who" over "what" — and a final "src:" line
-        # naming the source(s) that flagged the match (the creating org,
-        # i.e. the feed provider for feed-imported events). Kept on
-        # separate lines to stay readable inside one column.
+        # Attribution shown as labelled lines so the cell self-describes to
+        # a reader opening the PDF cold: who (Actor), what tool, which ATT&CK
+        # techniques (short codes; full names live in the section's ATT&CK
+        # legend row), and which source flagged the match.
         attribution_parts = []
         if r['actors']:
-            attribution_parts.append(', '.join(r['actors']))
-        if r['galaxies']:
-            attribution_parts.append(', '.join(r['galaxies']))
+            attribution_parts.append('<b>Actor:</b> ' + ', '.join(r['actors']))
+        if r['tools']:
+            attribution_parts.append('<b>Tool:</b> ' + ', '.join(r['tools']))
+        if r['attck']:
+            attribution_parts.append('<b>ATT&amp;CK:</b> ' + ' · '.join(r['attck']))
         if r['sources']:
-            attribution_parts.append('<i>src: ' + ', '.join(r['sources']) + '</i>')
+            attribution_parts.append(
+                '<i><b>Source:</b> ' + ', '.join(r['sources']) + '</i>')
         attribution = '<br/>'.join(attribution_parts) if attribution_parts else '—'
 
         if r['match']:
@@ -1037,7 +1092,7 @@ def render_misp(analysis):
                 Paragraph(f'<font color="#c62828"><b>{r["type"]}</b></font>',
                           STYLE_MONO),
                 Paragraph(f'<font color="#c62828"><b>{r["value"]}</b></font>',
-                          STYLE_MONO),
+                          STYLE_MONO_WRAP),
                 Paragraph(f'<font color="#c62828"><b>{r["match"]}</b></font>',
                           STYLE_MONO),
                 Paragraph(f'<font color="#c62828">{attribution}</font>',
@@ -1048,16 +1103,22 @@ def render_misp(analysis):
         else:
             rows.append([
                 _p_mono(r['type']),
-                _p_mono(r['value']),
+                Paragraph(_safe(r['value']), STYLE_MONO_WRAP),
                 _p_mono(str(r['match'])),
                 _p(attribution, STYLE_BODY),
                 _p(r['context'], STYLE_MUTED),
             ])
 
     ioc_table = Table(
-        rows, colWidths=[18 * mm, 50 * mm, 12 * mm, 48 * mm, 52 * mm],
+        rows, colWidths=[18 * mm, 42 * mm, 12 * mm, 58 * mm, 50 * mm],
     )
-    ioc_table.setStyle(_coc_table_style())
+    style = _coc_table_style()
+    # Zebra striping: alternate light-grey rows make a tall table with
+    # multi-line cells easy to track horizontally. Data rows only (row 0 is
+    # the header); shade every other data row starting from the second.
+    for i in range(2, len(rows), 2):
+        style.add('BACKGROUND', (0, i), (-1, i), HexColor('#f4f6f8'))
+    ioc_table.setStyle(style)
     flow.append(ioc_table)
     flow.append(Spacer(1, 4 * mm))
 
