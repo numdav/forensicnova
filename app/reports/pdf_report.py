@@ -443,24 +443,41 @@ def render_evidence(report):
         flow.append(Spacer(1, 4 * mm))
         flow.append(Paragraph('SLO segments', STYLE_H2))
         seg_rows = [[
-            _p('#',     STYLE_LABEL),
-            _p('Name',  STYLE_LABEL),
-            _p('Size',  STYLE_LABEL),
-            _p('MD5',   STYLE_LABEL),
-            _p('ETag',  STYLE_LABEL),
+            _p('#',           STYLE_LABEL),
+            _p('Name',        STYLE_LABEL),
+            _p('Size',        STYLE_LABEL),
+            _p('MD5 / ETag',  STYLE_LABEL),
         ]]
         for i, seg in enumerate(segments, start=1):
+            md5 = seg.get('md5')
+            etag = seg.get('etag')
+            # The Swift ETag of a segment uploaded in a single PUT IS that
+            # segment's MD5, so the two columns were always identical -> merge
+            # them. Show the MD5; only when an ETag genuinely differs (e.g. a
+            # composite/multipart manifest) do we surface both, labelled, so
+            # the merge can never hide a real divergence.
+            if etag and md5 and etag != md5:
+                hash_cell = f'<b>MD5:</b> {md5}<br/><b>ETag:</b> {etag}'
+            else:
+                hash_cell = _safe(md5)
             seg_rows.append([
                 _p_mono(str(i)),
-                _p_mono(seg.get('name')),
+                Paragraph(_safe(seg.get('name')), STYLE_MONO_WRAP),
                 _p_mono(_fmt_size(seg.get('size'))),
-                _p_mono(seg.get('md5')),
-                _p_mono(seg.get('etag')),
+                Paragraph(hash_cell, STYLE_MONO_WRAP),
             ])
         seg_table = Table(seg_rows,
-                          colWidths=[10 * mm, 50 * mm, 30 * mm, 45 * mm, 45 * mm])
+                          colWidths=[8 * mm, 56 * mm, 46 * mm, 70 * mm])
         seg_table.setStyle(_coc_table_style())
         flow.append(seg_table)
+        flow.append(Spacer(1, 1.5 * mm))
+        flow.append(Paragraph(
+            'The MD5 / ETag column shows the MD5 of each segment; for a '
+            'segment uploaded in a single PUT the Swift ETag equals that '
+            'MD5, so the two coincide. A differing ETag would be listed '
+            'explicitly.',
+            STYLE_MUTED,
+        ))
 
     return flow
 
