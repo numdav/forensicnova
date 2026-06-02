@@ -287,10 +287,14 @@
             <td>{{ misp_summary.iocs_without_match|default:0 }}</td></tr>
         <tr><th>{% trans "Threat actors" %}</th>
             <td>{{ misp_summary.unique_actors|default:"—" }}</td></tr>
-        <tr><th>{% trans "Galaxies" %}</th>
-            <td>{{ misp_summary.unique_galaxies|default:"—" }}</td></tr>
+        {% if misp_summary.tools %}
+        <tr><th>{% trans "Tools" %}</th>
+            <td>{{ misp_summary.tools }}</td></tr>
+        {% endif %}
+        {% if misp_summary.attck_techniques %}
         <tr><th>{% trans "MITRE ATT&CK techniques" %}</th>
-            <td>{{ misp_summary.unique_attck|default:"—" }}</td></tr>
+            <td>{{ misp_summary.attck_techniques }}</td></tr>
+        {% endif %}
     </table>
 
     {% comment %} Main table — one row per enriched IOC (analogue of the plugin
@@ -308,7 +312,7 @@
             <th>{% trans "Context" %}</th>
             <th>{% trans "MISP matches" %}</th>
             <th>{% trans "Threat actors" %}</th>
-            <th>{% trans "Galaxies" %}</th>
+            <th>{% trans "Tools / ATT&CK" %}</th>
             <th>{% trans "Source" %}</th>
             <th>{% trans "Sample event(s)" %}</th>
         </tr></thead>
@@ -325,7 +329,11 @@
                 {% endif %}
             </td>
             <td>{% if ioc.actors %}{{ ioc.actors }}{% else %}—{% endif %}</td>
-            <td>{% if ioc.galaxies %}{{ ioc.galaxies }}{% else %}—{% endif %}</td>
+            <td>
+                {% if ioc.tools %}<strong>Tool:</strong> {{ ioc.tools }}<br>{% endif %}
+                {% if ioc.attck %}<strong>ATT&amp;CK:</strong> {{ ioc.attck }}{% endif %}
+                {% if not ioc.tools and not ioc.attck %}—{% endif %}
+            </td>
             <td>{% if ioc.source %}{{ ioc.source }}{% else %}—{% endif %}</td>
             <td>{% if ioc.event_info %}<small>{{ ioc.event_info }}</small>{% else %}—{% endif %}</td>
         </tr>

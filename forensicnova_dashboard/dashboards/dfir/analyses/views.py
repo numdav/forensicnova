@@ -38,6 +38,7 @@ return an empty payload rather than a 500.
 from __future__ import annotations
 
 import logging
+import re
 
 from django.contrib import messages
 from django.http import JsonResponse, StreamingHttpResponse
@@ -221,6 +222,32 @@ class DetailView(generic.TemplateView):
         else:
             ctx["misp_intelligence_source"] = "—"
 
+        # Parse the raw "type:value" galaxy rollup into readable, non-
+        # redundant groups (mirrors the PDF report): tool names, and ATT&CK
+        # techniques as "Name (code)" which doubles as the legend for the
+        # short codes shown per-IOC. Replaces the old single galaxy wall,
+        # which duplicated the actor and the techniques shown elsewhere.
+        s_tool_names = []
+        s_techniques = []  # (sort_key, "Name (code)")
+        for g in (summary.get("unique_galaxies") or []):
+            gtype, _, gval = g.partition(":")
+            gtype = gtype.lower()
+            if not gval:
+                continue
+            if "tool" in gtype:
+                name = gval.split(" - ")[0].strip()
+                if name not in s_tool_names:
+                    s_tool_names.append(name)
+            elif "attack-pattern" in gtype:
+                m = re.search(r"T\d{4}(?:\.\d+)?", gval)
+                code = m.group(0) if m else ""
+                name = re.sub(r"\s*-\s*T\d{4}(?:\.\d+)?\s*$", "", gval).strip()
+                label = f"{name} ({code})" if code else name
+                pair = (code or label, label)
+                if pair not in s_techniques:
+                    s_techniques.append(pair)
+        s_techniques.sort(key=lambda x: x[0])
+
         # Aggregate summary block (joined lists render as plain text, in
         # keeping with the lightweight style of the rest of the table).
         ctx["misp_summary"] = {
@@ -230,8 +257,8 @@ class DetailView(generic.TemplateView):
             "iocs_with_misp_match": summary.get("iocs_with_misp_match"),
             "iocs_without_match":   summary.get("iocs_without_match"),
             "unique_actors":  ", ".join(summary.get("unique_actors") or []),
-            "unique_galaxies": ", ".join(summary.get("unique_galaxies") or []),
-            "unique_attck":   ", ".join(summary.get("unique_attck") or []),
+            "tools":          ", ".join(sorted(s_tool_names)),
+            "attck_techniques": ", ".join(lbl for _k, lbl in s_techniques),
         }
 
         # Injection signals: split into the precise detectors that DRIVE the
@@ -279,7 +306,8 @@ class DetailView(generic.TemplateView):
         for entry in (analysis.get("enrichment") or []):
             events = entry.get("events") or []
             actors = set()
-            galaxies = set()
+            tools = set()
+            attck = set()
             sources = set()
             event_infos = []
             for ev in events:
@@ -292,9 +320,23 @@ class DetailView(generic.TemplateView):
                 if hint and not a:
                     actors.add(f"{hint}?")
                 for g in (ev.get("galaxies") or []):
-                    v = g.get("value")
-                    if v:
-                        galaxies.add(v)
+                    gv = g.get("value")
+                    if not gv:
+                        continue
+                    gtype = (g.get("type") or "").lower()
+                    if "attack-pattern" in gtype:
+                        # technique -> short ATT&CK code (full names live in
+                        # the summary's ATT&CK techniques legend row)
+                        code = g.get("attck_id")
+                        if not code:
+                            m = re.search(r"T\d{4}(?:\.\d+)?", gv)
+                            code = m.group(0) if m else ""
+                        if code:
+                            attck.add(code)
+                    elif "tool" in gtype:
+                        tools.add(gv.split(" - ")[0].strip())
+                    # threat-actor / intrusion-set already captured via the
+                    # actor column above -> not repeated here
                 # Per-IOC source: the org that created the matched event
                 # (Orgc) — the feed provider (e.g. CIRCL) for feed-imported
                 # events. WHICH source flagged THIS match, distinct from the
@@ -310,7 +352,8 @@ class DetailView(generic.TemplateView):
                 "context":    entry.get("context"),
                 "misp_match": entry.get("misp_match") or 0,
                 "actors":     ", ".join(sorted(actors)),
-                "galaxies":   ", ".join(sorted(galaxies)),
+                "tools":      ", ".join(sorted(tools)),
+                "attck":      " · ".join(sorted(attck)),
                 "source":     ", ".join(sorted(sources)),
                 "event_info": "; ".join(event_infos[:3]),
             })
