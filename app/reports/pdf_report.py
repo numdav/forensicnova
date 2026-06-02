@@ -1012,8 +1012,7 @@ def render_misp(analysis):
         _p('Context',     STYLE_LABEL),
     ]
     rows = [header]
-    match_rows = []  # row indices with at least one MISP hit (flag in red)
-    for i, r in enumerate(ioc_rows, start=1):
+    for r in ioc_rows:
         # Attribution combines the threat actor(s), the MISP galaxy /
         # cluster name(s) — "who" over "what" — and a final "src:" line
         # naming the source(s) that flagged the match (the creating org,
@@ -1028,25 +1027,37 @@ def render_misp(analysis):
             attribution_parts.append('<i>src: ' + ', '.join(r['sources']) + '</i>')
         attribution = '<br/>'.join(attribution_parts) if attribution_parts else '—'
 
-        rows.append([
-            _p_mono(r['type']),
-            _p_mono(r['value']),
-            _p_mono(str(r['match'])),
-            _p(attribution, STYLE_BODY),
-            _p(r['context'], STYLE_MUTED),
-        ])
         if r['match']:
-            match_rows.append(i)
+            # Matched IOC -> highlight the whole row in red so the indicators
+            # an analyst acts on first stand out. Coloured INLINE because a
+            # table-level TEXTCOLOR is ignored on Paragraph cells in ReportLab
+            # (same reason render_injection_signals colours inline). Type and
+            # value are bolded for extra emphasis. '#c62828' mirrors COLOR_FAIL.
+            rows.append([
+                Paragraph(f'<font color="#c62828"><b>{r["type"]}</b></font>',
+                          STYLE_MONO),
+                Paragraph(f'<font color="#c62828"><b>{r["value"]}</b></font>',
+                          STYLE_MONO),
+                Paragraph(f'<font color="#c62828"><b>{r["match"]}</b></font>',
+                          STYLE_MONO),
+                Paragraph(f'<font color="#c62828">{attribution}</font>',
+                          STYLE_BODY),
+                Paragraph(f'<font color="#c62828">{r["context"]}</font>',
+                          STYLE_MUTED),
+            ])
+        else:
+            rows.append([
+                _p_mono(r['type']),
+                _p_mono(r['value']),
+                _p_mono(str(r['match'])),
+                _p(attribution, STYLE_BODY),
+                _p(r['context'], STYLE_MUTED),
+            ])
 
     ioc_table = Table(
         rows, colWidths=[18 * mm, 50 * mm, 12 * mm, 48 * mm, 52 * mm],
     )
-    style = _coc_table_style()
-    # Highlight rows that matched MISP — the IOCs an analyst acts on first.
-    for r in match_rows:
-        style.add('TEXTCOLOR', (0, r), (-1, r), COLOR_FAIL)
-        style.add('FONT',      (0, r), (0, r), 'Helvetica-Bold', 8.5)
-    ioc_table.setStyle(style)
+    ioc_table.setStyle(_coc_table_style())
     flow.append(ioc_table)
     flow.append(Spacer(1, 4 * mm))
 
