@@ -234,6 +234,42 @@ class DetailView(generic.TemplateView):
             "unique_attck":   ", ".join(summary.get("unique_attck") or []),
         }
 
+        # Injection signals: split into the precise detectors that DRIVE the
+        # threat score (rule R2) and the informational counters that are
+        # intentionally NOT scored (too noisy). Pre-formatted here (rows +
+        # a 'fired' flag) so the template stays declarative, mirroring the
+        # PDF report's two-group layout. Absent on older enrichments that
+        # predate the injection_signals field -> present=False -> hidden.
+        sig = analysis.get("injection_signals") or {}
+        if sig:
+            scoring_defs = [
+                ("suspicious_threads", "Suspicious threads"),
+                ("hollow_processes",   "Hollow processes"),
+                ("process_ghosting",   "Process ghosting"),
+                ("service_diff",       "Service diff"),
+            ]
+            info_defs = [
+                ("malfind_regions",     "Malfind regions"),
+                ("psxview_only_psscan", "Psxview-only (psscan)"),
+            ]
+            scoring_rows = [
+                {"label": lbl, "count": (sig.get(k) or 0),
+                 "fired": isinstance(sig.get(k), int) and (sig.get(k) or 0) > 0}
+                for k, lbl in scoring_defs if k in sig
+            ]
+            info_rows = [
+                {"label": lbl, "count": (sig.get(k) or 0)}
+                for k, lbl in info_defs if k in sig
+            ]
+            ctx["misp_injection"] = {
+                "present": True,
+                "scoring_rows": scoring_rows,
+                "scoring_ran": bool(scoring_rows),
+                "informational_rows": info_rows,
+            }
+        else:
+            ctx["misp_injection"] = {"present": False}
+
         # Main table: one row per enriched IOC. Each row carries the
         # IOC type/value, the number of MISP events it matched, and a
         # compact rollup of actors and galaxies seen across those

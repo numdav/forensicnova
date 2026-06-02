@@ -759,6 +759,89 @@ def render_volatility(analysis):
     return flow
 
 
+def render_injection_signals(analysis):
+    """Render the injection-signals breakdown for ONE misp enrichment.
+
+    injection_signals is a TOP-LEVEL field on the misp schema, populated by
+    the analyzer from the Volatility malware plugins. Split into two groups
+    so the report EXPLAINS the threat score instead of listing six bare
+    numbers:
+      - Scoring detectors (suspicious_threads / hollow_processes /
+        process_ghosting / service_diff): drive threat-score rule R2; a
+        non-zero count fires RED and is highlighted here.
+      - Informational (malfind_regions / psxview_only_psscan): context only,
+        intentionally NOT scored (too noisy on a clean Windows dump).
+    Degrades gracefully: returns [] when injection_signals is absent (old
+    enrichments predate this field). When only the informational keys are
+    present (the fast preset does not run the precise detectors) the scoring
+    group shows a 'not run' note instead of misleading zeros.
+    """
+    sig = analysis.get('injection_signals') or {}
+    if not sig:
+        return []
+
+    # (key, human label) in display order; only keys PRESENT are rendered.
+    scoring = [
+        ('suspicious_threads', 'Suspicious threads'),
+        ('hollow_processes',   'Hollow processes'),
+        ('process_ghosting',   'Process ghosting'),
+        ('service_diff',       'Service diff'),
+    ]
+    informational = [
+        ('malfind_regions',     'Malfind regions'),
+        ('psxview_only_psscan', 'Psxview-only (psscan)'),
+    ]
+    col_widths = [60 * mm, 120 * mm]
+    # Inline <font> markup because a table-level TEXTCOLOR does NOT recolour
+    # Paragraph cells in ReportLab; mirrors COLOR_FAIL (#c62828).
+    fail_hex = '#c62828'
+
+    flow = [Paragraph('Injection signals', STYLE_H2)]
+
+    # --- Scoring detectors (drive the threat score) ---
+    flow.append(Paragraph(
+        'Scoring detectors &mdash; these determine the threat score',
+        STYLE_LABEL,
+    ))
+    present = [(k, lbl) for (k, lbl) in scoring if k in sig]
+    if present:
+        rows = []
+        for k, lbl in present:
+            n = sig.get(k) or 0
+            if isinstance(n, int) and n > 0:   # fired -> highlight in red
+                rows.append([
+                    Paragraph(
+                        f'<font color="{fail_hex}"><b>{lbl} &mdash; fired</b></font>',
+                        STYLE_BODY),
+                    Paragraph(f'<font color="{fail_hex}"><b>{n}</b></font>',
+                              STYLE_MONO),
+                ])
+            else:
+                rows.append([_p(lbl), _p_mono(str(n))])
+        t = Table(rows, colWidths=col_widths)
+        t.setStyle(_kv_table_style())
+        flow.append(t)
+    else:
+        flow.append(Paragraph(
+            '(precise detectors not run &mdash; full preset only)', STYLE_MUTED,
+        ))
+    flow.append(Spacer(1, 2 * mm))
+
+    # --- Informational (context only, never scored) ---
+    flow.append(Paragraph(
+        'Informational &mdash; context only, not scored', STYLE_LABEL,
+    ))
+    present = [(k, lbl) for (k, lbl) in informational if k in sig]
+    if present:
+        rows = [[_p(lbl), _p_mono(str(sig.get(k) or 0))] for (k, lbl) in present]
+        t = Table(rows, colWidths=col_widths)
+        t.setStyle(_kv_table_style())
+        flow.append(t)
+    flow.append(Spacer(1, 4 * mm))
+
+    return flow
+
+
 def render_misp(analysis):
     """Render ONE misp enrichment analysis.
 
@@ -806,6 +889,9 @@ def render_misp(analysis):
     if reason:
         flow.append(Paragraph(_safe(reason), STYLE_MUTED))
     flow.append(Spacer(1, 2 * mm))
+
+    # ---- injection signals (explains WHY the threat score is what it is) ----
+    flow.extend(render_injection_signals(analysis))
 
     # ---- aggregate summary ----
     # Intelligence source first: which threat-intel feeds the IOCs were

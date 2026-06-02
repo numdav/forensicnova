@@ -233,6 +233,46 @@
         </div>
     {% endif %}
 
+    {% comment %} Injection signals — scoring detectors (drive the threat score,
+       fired ones flagged red) vs informational counters (context only, never
+       scored). Hidden when injection_signals is absent (older enrichments). {% endcomment %}
+    {% if misp_injection.present %}
+    <h3>{% trans "Injection signals" %}</h3>
+
+    <p><small>{% trans "Scoring detectors — these determine the threat score" %}</small></p>
+    {% if misp_injection.scoring_ran %}
+    <table class="table table-bordered">
+        {% for row in misp_injection.scoring_rows %}
+        {% if row.fired %}
+        <tr>
+            <th style="width: 24em; color: red;">{{ row.label }} — {% trans "fired" %}</th>
+            <td><span style="color: red;"><strong>{{ row.count }}</strong></span></td>
+        </tr>
+        {% else %}
+        <tr>
+            <th style="width: 24em;">{{ row.label }}</th>
+            <td>{{ row.count }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+    </table>
+    {% else %}
+    <div class="alert alert-info">
+        {% trans "Precise detectors are run by the full preset only; this analysis did not run them." %}
+    </div>
+    {% endif %}
+
+    <p><small>{% trans "Informational — context only, not scored" %}</small></p>
+    <table class="table table-bordered">
+        {% for row in misp_injection.informational_rows %}
+        <tr>
+            <th style="width: 24em;">{{ row.label }}</th>
+            <td>{{ row.count }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+
     {# Aggregate summary — counts and attribution rollup. #}
     <table class="table table-bordered">
         <tr><th style="width: 24em;">{% trans "IOCs extracted" %}</th>
