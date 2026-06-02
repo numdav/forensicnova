@@ -1210,30 +1210,45 @@ def render_disclaimer():
     flow.append(Paragraph('Notice', STYLE_H1))
     paragraphs = [
         "This report is generated automatically by the ForensicNova plugin "
-        "from the canonical JSON acquisition record. The JSON record, the raw "
-        "memory image, and the chain-of-custody journal are the primary "
-        "evidentiary artifacts; this PDF is a printable presentation of those "
-        "artifacts intended for legal hand-off and operator countersignature.",
+        "from the canonical JSON records of a single acquisition: the "
+        "acquisition report and the associated Volatility 3 and MISP analysis "
+        "records produced by the ForensicNova analyzer. Those JSON records, "
+        "the raw memory image, and the chain-of-custody journal are the "
+        "primary evidentiary artifacts; this PDF is a printable presentation "
+        "of them intended for legal hand-off and operator countersignature.",
 
         "Cryptographic integrity of the memory image is established at the "
-        "hypervisor before any transfer (MD5 + SHA-1, streaming) and "
-        "verified end-to-end against Swift via ETag comparison. The chain of "
-        "custody is appended to a journal on the hypervisor and embedded in "
-        "the JSON report. Any tampering with stored evidence breaks the hash "
-        "match; tampering with the PDF does not affect the underlying evidence.",
+        "hypervisor before any transfer (MD5 + SHA-1, streaming) and verified "
+        "end-to-end against Swift via ETag comparison. Before processing, "
+        "each analysis independently re-reads the stored image and confirms "
+        "its hashes against the acquisition record (the coherence check "
+        "reported in every analysis section). The chain of custody is "
+        "appended to a journal on the hypervisor and embedded in the JSON "
+        "report. Any tampering with stored evidence breaks the hash match; "
+        "tampering with the PDF does not affect the underlying evidence.",
+
+        "Forensic analysis is performed by the ForensicNova analyzer service: "
+        "memory extraction with Volatility 3 and automated indicator "
+        "enrichment against MISP threat intelligence. Threat-intelligence "
+        "correlations are only as authoritative as the sources behind them; "
+        "the feeds queried at analysis time are recorded in each enrichment "
+        "(the Intelligence source field), and every reported match should be "
+        "read against that provenance.",
 
         "Each generation of this PDF is a distinct act and carries the UTC "
         "timestamp of generation. The operator named on the cover is the "
-        "analyst who performed the acquisition and who countersigns this "
-        "document. Reproducing this PDF at a later time will produce a new, "
-        "byte-different document with a new generation timestamp; the "
-        "underlying evidence remains the same.",
+        "analyst who performed the acquisition and the subsequent analysis, "
+        "and who countersigns this document. Reproducing this PDF at a later "
+        "time will produce a new, byte-different document with a new "
+        "generation timestamp; the underlying evidence and analysis records "
+        "remain the same.",
 
-        "ForensicNova is an academic prototype developed at Università degli "
-        "Studi di Salerno (ISISLab) for the M.Sc. course Piattaforme di "
-        "Cloud Computing and as baseline for the related M.Sc. thesis. "
-        "Use in production forensic workflows is the responsibility of the "
-        "deploying organisation.",
+        "ForensicNova is an academic prototype developed at the Università "
+        "degli Studi di Salerno (ISISLab) as the M.Sc. thesis project for the "
+        "degree programme in Sicurezza Informatica e Tecnologie Cloud, having "
+        "originated as coursework for the Piattaforme di Cloud Computing "
+        "course. Use in production forensic workflows is the responsibility "
+        "of the deploying organisation.",
     ]
     for p in paragraphs:
         flow.append(Paragraph(p, STYLE_DISCLAIMER))
