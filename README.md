@@ -646,9 +646,9 @@ This is a *sensitivity* result: same dump, same Volatility output, same detectio
 
 The same dump can be analysed with either the `fast` preset (~11 plugins, ~30 seconds, behavioural signals only via informational counters) or the `full` preset (~34 plugins, ~10 minutes, with the precise injection detectors). The fast preset is appropriate for triage and routine sweeps; the full preset is the deeper dive that lets behavioural rules (R2) trip on their own.
 
-![Volatility full preset detail](docs/screenshots/horizon-06-analysis-volatility.png)
-
 ![Volatility fast preset detail](docs/screenshots/horizon-10-analysis-volatility-fast.png)
+
+![Volatility full preset detail](docs/screenshots/horizon-06-analysis-volatility.png)
 
 The triple-witness coherence check is identical on both presets (the dump is hashed once in each analyzer run); the analyses differ only in which Volatility plugins are executed.
 
