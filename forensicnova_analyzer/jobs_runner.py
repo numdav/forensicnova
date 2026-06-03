@@ -855,7 +855,7 @@ def _run_misp_enrichment(
             misp_url=msec["url"],
             auth_key=msec["auth_key"],
             verify_cert=msec.getboolean("verify_cert", fallback=False),
-            timeout=msec.getint("timeout", fallback=30),
+            timeout=msec.getint("timeout_seconds", fallback=msec.getint("timeout", fallback=30)),
         )
 
         analysis_json_dict = enricher.run(
