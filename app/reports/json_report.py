@@ -72,6 +72,9 @@ log = logging.getLogger("forensicnova.reports.json")
 SCHEMA_VERSION = "1.2"
 
 _EVENT_DESCRIPTIONS = {
+    # --- Async pipeline lifecycle (common to all paths) ---------------------
+    "async_job_started":              "Async pipeline worker started — job picked up from REST endpoint",
+
     # --- Single-PUT upload events -------------------------------------------
     "api_request_received":           "REST endpoint received the acquisition request",
     "acquisition_initiated":          "Acquisition pipeline started — instance identified",
