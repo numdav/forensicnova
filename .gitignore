@@ -31,6 +31,9 @@ ENV/
 *.core
 # Generated reports may contain sensitive case data
 *.pdf
+# Exception: curated sample PDF — lab-only acquisition with TEST-NET IPs
+# and SIMULATED markers, intentionally published as documentation.
+!docs/examples/sample-forensic-report.pdf
 *.json.report
 reports/output/
 dumps/

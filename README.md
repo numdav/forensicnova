@@ -50,99 +50,120 @@ Six guarantees are implemented and individually traceable in the chain-of-custod
 
 The deployment is a monorepo that wires **three DevStack services** plus an **external MISP threat-intelligence lab** that the plugin does not manage. Five systemd units are expected to be active in the demo configuration: `devstack@forensicnova` (acquisition backend on `:5234`), `devstack@forensicnova-analyzer` (analyzer backend on `:5235`), `apache2` (host for the Horizon dashboard, which runs as an Apache-served Django application), `docker` (container runtime for the MISP lab stack), and a standalone `forensicnova-misp.service` (the operator-managed MISP `docker compose` lifecycle). Two Swift containers hold all forensic evidence: `forensics` (acquisition reports, raw dumps, Volatility analyses, MISP analyses) and `forensics_segments` (per-segment SLO storage for dumps ≥ 4 GiB). Two Keystone services advertise the backends in the catalog: `dfir` (type `dfir`, the acquisition API) and `dfir-analyzer` (type `dfir-analyzer`, the analyzer API). A dedicated role `forensic_analyst` gates every authenticated endpoint, and the user `dfir-tester` is granted the role on the `forensics` project plus a cross-tenant `admin` grant on every other project so the operator can acquire RAM from any compromised VM without pre-knowing the tenant.
 
-```mermaid
-flowchart TD
-    %% Style Definitions
-    classDef actor fill:#eceff1,stroke:#37474f,stroke-width:2px;
-    classDef api fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;
-    classDef pipe fill:#e3f2fd,stroke:#1565c0,stroke-width:1px;
-    classDef storage fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
-    classDef external fill:#fce4ec,stroke:#c2185b,stroke-width:1px;
-
-    %% Operator Layer
-    subgraph OPERATOR_LAYER ["OPERATOR / DFIR ANALYST"]
-        Op["browser / curl / scripts"]
-    end
-    class Op actor;
-
-    %% Dashboards Layer
-    subgraph DASHBOARDS_LAYER ["DASHBOARDS"]
-        DB["Horizon - DFIR panel group (official UI)<br>&<br>Flask - :5234 (backup, acq.)"]
-    end
-
-    Op -->|HTTP / Keystone X-Auth-Token| DB
-
-    %% API & Auth Layer
-    subgraph API_LAYER ["API LAYER"]
-        AcqAPI["Acquisition API<br>:5234/api/v1"]
-        AnAPI["Analyzer API<br>:5235/api/v1"]
-    end
-    class AcqAPI,AnAPI api;
-
-    DB --> AcqAPI
-    DB --> AnAPI
-
-    Keystone["Keystone<br>• role: forensic_analyst<br>• dfir/dfir-analyzer"]
-    class Keystone external;
-    AnAPI <-->|authN / authZ| Keystone
-
-    %% Pipelines Layer
-    subgraph PIPELINES ["PIPELINES"]
-        subgraph ACQ_PIPE ["ACQUISITION PIPELINE"]
-            P1["1 libvirt coreDump<br>(raw, no guest writes)"]
-            P2["2 MD5 + SHA-1<br>(streaming 64 KB)"]
-            P3["3 Nova/Glance/libvirt metadata"]
-            P4["4 Swift upload<br>+ ETag/SLO verify"]
-            P5["5 secure delete shred<br>(only if verified)"]
-            
-            P1 --> P2
-            P2 --> P3
-            P3 --> P4
-            P4 --> P5
-        end
-        
-        subgraph AN_PIPE ["ANALYSIS PIPELINE"]
-            A1["triple-witness hash<br>coherence check"]
-            A2["Volatility 3<br>(fast/full/custom)"]
-            A3["MISP IOC enrichment<br>(extract/correlate / threat score)"]
-            
-            A1 --> A2
-            A2 --> A3
-        end
-    end
-    class P1,P2,P3,P4,P5,A1,A2,A3 pipe;
-
-    AcqAPI --> P1
-    AnAPI --> A1
-
-    MISP["MISP server<br>(external, CIRCL OSINT feed)"]
-    class MISP external;
-    A3 <-->|IOC lookup| MISP
-
-    %% Storage Layer (Evidence Locker)
-    subgraph SWIFT_LAYER ["SWIFT - EVIDENCE LOCKER"]
-        Swift["Containers: forensics + forensics_segments<br>===<br>• RAM dump (.raw)<br>• acquisition report JSON v1.2<br>• Volatility JSON<br>• MISP JSON (+ threat score)"]
-    end
-    class Swift storage;
-
-    P5 -->|dump + report v1.2| Swift
-    A3 -->|Volatility + MISP JSON| Swift
-    
-    %% Footnote 1
-    Swift -.->|Reads verified dump back<br>before each analysis| A1
-
-    %% Final Output
-    PDF["PDF FORENSIC REPORT<br>(operator-signable, on-demand)"]
-    Swift -->|report + analyses| PDF
-
-    %% Chain of Custody Log
-    CoC["[Log] Chain of custody:<br>Append-only JSONL log"]
-    P1 -.-> CoC
-    P2 -.-> CoC
-    P3 -.-> CoC
-    P4 -.-> CoC
-    P5 -.-> CoC
-    CoC -.->|Embedded in<br>acquisition report| Swift
+```
+                            [ OPERATOR / DFIR ANALYST ]
+                                       │
+                              browser / curl / scripts
+                                       │
+                                       ▼
+                            ┌──────────────────────┐
+                            │     DASHBOARDS       │
+                            │                      │
+                            │  Horizon (DFIR panel │ ◄────── Apache + Django
+                            │  group, recommended) │
+                            │  Flask (legacy/      │
+                            │  backup, acq. only)  │
+                            └──────────┬───────────┘
+                                       │
+                  HTTP + Keystone X-Auth-Token
+                                       │
+                                       ▼
+                            ┌──────────────────────┐
+                            │     API LAYER        │
+                            │                      │
+                  ┌─────────┤  Analyzer API :5235  │
+                  │         │     (dfir-analyzer)  │
+                  │         │                      │
+                  │         │  Acquisition API     │
+                  │         │     :5234 (dfir)     │
+                  │         └──────────┬───────────┘
+                  │                    │
+                  │                    │       ┌─────────────────────────┐
+                  │                    │       │   Keystone              │
+                  │                    │ ◄────►│   role: forensic_analyst│
+                  │                    │       │   service types:        │
+                  │                    │       │   dfir / dfir-analyzer  │
+                  │                    │       └─────────────────────────┘
+                  │                    ▼
+                  │   ┌──────────────────────────────────────┐
+                  │   │    ACQUISITION PIPELINE              │
+                  │   │    (on hypervisor, async)            │
+                  │   │                                      │
+                  │   │   1. libvirt coreDumpWithFormat()    │
+                  │   │      (zero guest writes)             │
+                  │   │   2. MD5 + SHA-1                     │
+                  │   │      (streaming 64 KB chunks)        │
+                  │   │   3. Nova + Glance + libvirt XML     │
+                  │   │      metadata collection             │
+                  │   │   4. Swift PUT/SLO                   │
+                  │   │      + ETag verification             │
+                  │   │   5. secure delete (shred -u -n 1)   │
+                  │   │      (only if ETag verified)         │
+                  │   │   6. JSON report (schema v1.2)       │
+                  │   └────────────┬─────────────────────────┘
+                  │                │
+                  │           dump + report v1.2
+                  │                │
+                  │                ▼               ┌─────────────────────────────┐
+                  │       ┌────────────────┐       │  Chain of custody           │
+                  │       │ SWIFT          │ ◄─────│  append-only JSONL          │
+                  │       │ EVIDENCE       │       │  /var/log/forensicnova/     │
+                  │       │ LOCKER         │       │  chain-of-custody.jsonl     │
+                  │       │                │       │  (UTC µs + operator id)     │
+                  │       │ Containers:    │       │  + embedded in report       │
+                  │       │  forensics     │       └─────────────────────────────┘
+                  │       │  forensics_    │
+                  │       │  segments      │
+                  │       │                │
+                  │       │ Objects:       │
+                  │       │  - dump-*.raw  │
+                  │       │  - report-*    │
+                  │       │    .json v1.2  │
+                  │       │  - analysis-   │
+                  │       │    volatility- │
+                  │       │    *.json 1.0  │
+                  │       │  - analysis-   │
+                  │       │    misp-       │
+                  │       │    *.json 1.0  │
+                  │       └────────┬───────┘
+                  │                │
+                  │      Reads + re-verifies hashes
+                  │      before each analysis
+                  │                │
+                  ▼                ▼
+   ┌──────────────────────────────────────┐
+   │      ANALYSIS PIPELINE               │
+   │      (analyzer backend, async)       │
+   │                                      │
+   │  1. Triple-witness hash              │
+   │     coherence check                  │
+   │                                      │
+   │  2. Volatility 3                     │
+   │     (fast / full / custom presets)   │
+   │                                      │
+   │  3. MISP IOC enrichment              │
+   │     (netscan / cmdline / pslist      │
+   │      → ip-dst, url, sha256, filename)│
+   │     threat score (5 rules,           │
+   │      green / yellow / red)           │
+   └──────────────────────┬───────────────┘
+                          │
+                          │  IOC lookup
+                          ▼
+              ┌────────────────────────────┐
+              │  MISP SERVER (external)    │
+              │  Docker compose, not       │
+              │  managed by the plugin     │
+              │  CIRCL OSINT feed enabled  │
+              └──────────┬─────────────────┘
+                         │
+                         │   match + attribution
+                         ▼
+              ┌────────────────────────────┐
+              │   PDF FORENSIC REPORT      │
+              │   (operator signature,     │
+              │    on-demand, ReportLab)   │
+              └────────────────────────────┘
 ```
 
 **Crash isolation between backends.** The acquisition backend (`:5234`) and the analyzer backend (`:5235`) are deployed as separate Flask processes with separate virtualenvs (`.venv` and `.venv-analyzer`). A Volatility 3 crash on a malformed dump cannot interrupt an in-flight acquisition; an analyzer restart does not affect the acquisition pipeline; the two have independent systemd lifecycles and independent Keystone catalog entries. The Horizon dashboard plugin discovers both via Keystone catalog lookup and never hardcodes `host:port`.
@@ -608,6 +629,10 @@ The title on the cover and in every page header is *Volatile memory forensic rep
 
 **Headers and footers on every page** are rendered through a two-pass `NumberedCanvas` so the footer can show `page X of Y`: top band has the title (*ForensicNova — volatile memory forensic report*) on the left and operator identity on the right; bottom band has the full acquisition UUID on the left and `page X of Y` on the right.
 
+### Example
+
+A sample PDF produced by an actual lab run is available at [`docs/examples/sample-forensic-report.pdf`](docs/examples/sample-forensic-report.pdf). It is the report of a Windows Server 2022 acquisition infected with Mimikatz + Meterpreter, bundled with five analyses on the same evidence: two Volatility runs (`fast` and `full`) and three MISP enrichments that traverse the full threat-score progression — *YELLOW* (CIRCL OSINT matches only, no precise detectors), *RED via behavioural signals* (the `full` preset fires `suspicious_threads`), and *RED with attribution* (after curated demo events were loaded into the lab MISP, with the `simulated` marker visible on every event of curated origin so it is unambiguously distinguishable from a public-feed match). The triple-witness coherence check passes on all five analyses. Like every PDF produced by ForensicNova, the example is a *snapshot of one specific generation event* — a fresh regeneration would carry a different `CreationDate` and would be byte-different from this file, while the underlying JSON evidence remains the same.
+
 ---
 
 ## Detection capability
@@ -646,9 +671,9 @@ This is a *sensitivity* result: same dump, same Volatility output, same detectio
 
 The same dump can be analysed with either the `fast` preset (~11 plugins, ~30 seconds, behavioural signals only via informational counters) or the `full` preset (~34 plugins, ~10 minutes, with the precise injection detectors). The fast preset is appropriate for triage and routine sweeps; the full preset is the deeper dive that lets behavioural rules (R2) trip on their own.
 
-![Volatility fast preset detail](docs/screenshots/horizon-10-analysis-volatility-fast.png)
-
 ![Volatility full preset detail](docs/screenshots/horizon-06-analysis-volatility.png)
+
+![Volatility fast preset detail](docs/screenshots/horizon-10-analysis-volatility-fast.png)
 
 The triple-witness coherence check is identical on both presets (the dump is hashed once in each analyzer run); the analyses differ only in which Volatility plugins are executed.
 
