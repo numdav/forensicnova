@@ -1,12 +1,12 @@
 # ForensicNova
 
-**DevStack plugin for forensically sound RAM acquisition and analysis of OpenStack guest VMs — hypervisor-level memory imaging, cryptographic chain of custody, Volatility 3 analysis, MISP threat-intelligence enrichment, on-demand signed PDF reporting.**
+**DevStack plugin for forensically sound RAM acquisition and analysis of OpenStack guest VMs — hypervisor-level memory imaging, append-only chain of custody, Volatility 3 analysis, MISP threat-intelligence enrichment, on-demand operator-signable PDF reporting.**
 
-ForensicNova extends a stock OpenStack deployment with a dedicated digital-forensics service for incident response on tenant virtual machines. It acquires guest RAM at the hypervisor layer (zero footprint inside the guest), computes integrity hashes in streaming fashion on the hypervisor, persists the dump in Swift with end-to-end ETag verification, securely wipes the staging copy, and maintains an append-only chain-of-custody journal. The image is then analysed by a companion service that runs Volatility 3 (with `fast`, `full`, and `custom` presets) and correlates the extracted indicators of compromise against a MISP threat-intelligence instance, producing a per-IOC threat score, attribution to known actors / tools / ATT&CK techniques, and a feed-aware provenance record. The whole evidence chain — acquisition, analysis, intelligence — is presented through a Horizon panel group (the recommended UI) and through a per-acquisition signed PDF designed for operator countersignature and legal hand-off.
+ForensicNova extends a stock OpenStack deployment with a dedicated digital-forensics service for Incident Response on tenant virtual machines. It acquires guest RAM at the hypervisor layer (zero footprint inside the guest), computes integrity hashes in streaming fashion on the hypervisor, persists the dump in Swift with end-to-end ETag verification, securely wipes the staging copy, and maintains an append-only chain-of-custody journal. The image is then analysed by a companion service that runs Volatility 3 (with `fast`, `full`, and `custom` presets) and correlates the extracted indicators of compromise against a MISP threat-intelligence instance, producing a deterministic threat score per analysis (green / yellow / red), attribution to known actors / tools / ATT&CK techniques, and a feed-aware provenance record. The whole evidence chain — acquisition, analysis, intelligence — is presented through a Horizon panel group (the recommended UI) and through a per-acquisition operator-signable PDF designed for printed countersignature and legal hand-off.
 
 The intelligence extracted from the memory image is the core deliverable: the PDF and the dashboard are the two complementary views of that intelligence and stay aligned field by field.
 
-ForensicNova is the M.Sc. thesis project for the *Sicurezza Informatica e Tecnologie Cloud* degree programme at the **University of Salerno (ISISLab)**. It originated as coursework for the *Piattaforme di Cloud Computing* course and was extended into a full DFIR pipeline.
+ForensicNova is the M.Sc. thesis project for the Sicurezza Informatica e Tecnologie Cloud degree programme at the University of Salerno (ISISLab). It originated as coursework for the Piattaforme di Cloud Computing course and was extended into a full DFIR pipeline.
 
 ---
 
@@ -37,18 +37,18 @@ Six guarantees are implemented and individually traceable in the chain-of-custod
 |---|---|---|
 | 1 | **Zero bits written inside the guest** | Acquisition via libvirt `coreDumpWithFormat()` reading `/proc/<qemu-pid>/mem` on the hypervisor. No driver, agent, or hypervisor-side write reaches the guest OS. |
 | 2 | **Hardened staging directory** | Temporary dump lands in `/var/lib/forensicnova/acquisitions/<uuid>/`, directory mode `0700`, dump file mode `0600`, owned by the service user `stack:stack`. Never in `/tmp`, never on the guest filesystem. |
-| 3 | **Hashes computed on the hypervisor, before any transfer** | MD5 + SHA-1 (two independent algorithms, NIST 800-86 §3.2.2) computed in streaming over 64 KB chunks directly from the staging file. The hashes are persisted in the JSON report and re-verified by every downstream component. |
+| 3 | **Hashes computed on the hypervisor, before any transfer** | MD5 + SHA-1 (two independent algorithms for redundancy) computed in streaming over 64 KB chunks directly from the staging file, in line with NIST 800-86 §4.2.2 Data File Integrity. |
 | 4 | **End-to-end ETag integrity check with Swift** | On `PUT`, Swift returns a server-side MD5. For single-object uploads the local MD5 is compared byte-for-byte; for Static Large Object uploads (≥ 4 GiB), a composite ETag is computed per segment and verified against the server response. Mismatch → pipeline aborted, the chain-of-custody flags `etag_verified: false` and the staging copy is preserved for debugging. |
 | 5 | **Secure delete of the staging copy** | Once the upload is verified, the local dump is destroyed via `shred -u -n 1`. The hypervisor never retains a recoverable residue. |
 | 6 | **Append-only chain of custody** | All pipeline events are written to `/var/log/forensicnova/chain-of-custody.jsonl` as JSON lines, with ISO-8601 UTC timestamps to microsecond precision and the Keystone operator identity attached to every event. The journal is the authoritative audit log and is also embedded in the final JSON report. |
 
-**Triple-witness integrity.** The dump is hashed three independent times along its lifecycle: (1) on the hypervisor immediately after acquisition, by the acquisition backend (these are the authoritative hashes published in the JSON report); (2) by Swift, server-side, returned as ETag and verified end-to-end on upload; (3) by the analyzer backend, which re-downloads the dump from Swift and recomputes MD5 + SHA-1 before running any analysis, refusing to proceed unless its hashes match the report. Every analysis JSON carries a `coherence_check` field with the analyzer-read hashes and the `hashes_match_report` boolean — a third independent witness of integrity, produced after the evidence has crossed two service boundaries.
+**Triple-witness integrity.** The dump is hashed three independent times along its lifecycle: (1) on the hypervisor immediately after acquisition, by the acquisition backend (these are the authoritative hashes published in the JSON report); (2) by Swift, server-side, returned as ETag and verified end-to-end on upload; (3) by the **Volatility analyzer**, which re-downloads the dump from Swift and recomputes MD5 + SHA-1 before running any plugin, refusing to proceed unless its hashes match the report. Every Volatility analysis JSON carries a `coherence_check` field with the analyzer-read hashes and a `hashes_match_report` boolean — the third independent witness of integrity, produced after the evidence has crossed two service boundaries. The MISP enrichment **inherits** this verdict downstream (`source.hashes_match_report` in the MISP JSON) and fail-fasts if the upstream Volatility analysis flagged a mismatch, keeping every downstream finding bound to a verified-dump source.
 
 ---
 
 ## Architecture
 
-The deployment is a monorepo that wires **three DevStack services** plus an **external MISP threat-intelligence lab** that the plugin does not manage. Five systemd units are expected to be active in the demo configuration: `devstack@forensicnova` (acquisition backend on `:5234`), `devstack@forensicnova-analyzer` (analyzer backend on `:5235`), `apache2` (host for the Horizon dashboard, which runs as an Apache-served Django application), `docker` (container runtime for the MISP lab stack), and a standalone `forensicnova-misp.service` (the operator-managed MISP `docker compose` lifecycle). Two Swift containers hold all forensic evidence: `forensics` (acquisition reports, raw dumps, Volatility analyses, MISP analyses) and `forensics_segments` (per-segment SLO storage for dumps ≥ 4 GiB). Two Keystone services advertise the backends in the catalog: `dfir` (type `dfir`, the acquisition API) and `dfir-analyzer` (type `dfir-analyzer`, the analyzer API). A dedicated role `forensic_analyst` gates every authenticated endpoint, and the user `dfir-tester` is granted the role on the `forensics` project plus a cross-tenant `admin` grant on every other project so the operator can acquire RAM from any compromised VM without pre-knowing the tenant.
+The deployment is a monorepo that wires **three DevStack services** plus an **external MISP threat-intelligence lab** that the plugin does not manage. Five systemd units are expected to be active in the demo configuration: `devstack@forensicnova` (acquisition backend on `:5234`), `devstack@forensicnova-analyzer` (analyzer backend on `:5235`), `apache2` (host for the Horizon dashboard, which runs as an Apache-served Django application), `docker` (container runtime for the MISP lab stack), and a standalone `forensicnova-misp.service` (the operator-managed MISP `docker compose` lifecycle). Two Swift containers hold all forensic evidence: `forensics` (acquisition reports, raw dumps, Volatility analyses, MISP analyses) and `forensics_segments` (per-segment SLO storage for dumps ≥ 4 GiB). Two Keystone services advertise the backends in the catalog: `dfir` (type `dfir`, the acquisition API) and `dfir-analyzer` (type `dfir-analyzer`, the analyzer API). A dedicated role `forensic_analyst` gates every authenticated endpoint, and the user `dfir-tester` is granted the `forensic_analyst` role on the `forensics` project plus an `admin` grant on every project so the operator can acquire RAM from any compromised VM without pre-knowing the tenant.
 
 ```mermaid
 flowchart TD
@@ -148,7 +148,7 @@ flowchart TD
 
 **Crash isolation between backends.** The acquisition backend (`:5234`) and the analyzer backend (`:5235`) are deployed as separate Flask processes with separate virtualenvs (`.venv` and `.venv-analyzer`). A Volatility 3 crash on a malformed dump cannot interrupt an in-flight acquisition; an analyzer restart does not affect the acquisition pipeline; the two have independent systemd lifecycles and independent Keystone catalog entries. The Horizon dashboard plugin discovers both via Keystone catalog lookup and never hardcodes `host:port`.
 
-**Why MISP is external.** The MISP stack (six containers: `misp-core`, `misp-modules`, `db`, `redis`, `mail`, `misp-guard`) has its own lifecycle, multi-gigabyte persistent volumes, and a startup time on the order of minutes. Folding it into `plugin.sh` would couple DevStack `stack.sh` runs to MISP boot health and pull/build several gigabytes on every fresh stack. ForensicNova treats MISP as an external prerequisite, just like Keystone or Swift: the operator brings it up once via `docker compose` and registers a `forensicnova-misp.service` systemd unit for persistence across reboots. The analyzer reads `/etc/forensicnova/misp.conf` and gracefully fails with a clear message if MISP is unreachable, so the acquisition pipeline keeps working even when MISP is down.
+**Why MISP is external.** The MISP stack (five containers: `misp-core`, `misp-modules`, `db`, `redis`, `mail`) has its own lifecycle, multi-gigabyte persistent volumes, and a startup time on the order of minutes. Folding it into `plugin.sh` would couple DevStack `stack.sh` runs to MISP boot health and pull/build several gigabytes on every fresh stack. ForensicNova treats MISP as an external prerequisite, just like Keystone or Swift: the operator brings it up once via `docker compose` and registers a `forensicnova-misp.service` systemd unit for persistence across reboots. The analyzer reads `/etc/forensicnova/misp.conf` and gracefully fails with a clear message if MISP is unreachable, so the acquisition pipeline keeps working even when MISP is down.
 
 ---
 
@@ -216,7 +216,7 @@ MISP is a stand-alone Docker stack that the analyzer talks to over HTTPS. It is 
 ```ini
 [misp]
 url            = https://127.0.0.1:10443
-auth_key       = <44-char-key>
+auth_key       = <MISP-API-key>
 verify_cert    = false
 timeout_seconds = 30
 ```
@@ -288,7 +288,7 @@ The detail view renders the full JSON report (schema v1.2): timestamps with micr
 
 ![New acquisition form](docs/screenshots/horizon-03-new-acquisition.png)
 
-A form with a single dropdown listing all Nova instances visible to the analyst — cross-tenant, because `dfir-tester` carries the `admin` role on every project (see [Known limitations](#known-limitations)). Inactive (non-`ACTIVE`) instances are listed but disabled, because libvirt's `coreDumpWithFormat()` requires a running domain.
+A form with a single dropdown listing all Nova instances visible to the analyst — cross-tenant, because `dfir-tester` carries the `admin` role on every project (see [Known limitations](#known-limitations)). Inactive (non-ACTIVE) instances are listed in the dropdown with a clear non-ACTIVE label but are rejected on submit with a validation error, because libvirt's coreDumpWithFormat() requires a running domain.
 
 Submitting the form triggers the async pipeline and redirects to a watch page that polls `/api/v1/jobs/<id>` every 2 seconds, showing live status, the current human-readable phase label (e.g. `"Uploading dump (segment 2 of 3)"` for SLO acquisitions), and elapsed seconds:
 
@@ -360,13 +360,20 @@ ForensicNova exposes two HTTP backends on the same host. Both are protected by K
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/health` | none | Service liveness probe. |
-| `POST` | `/api/v1/analyses` | token | Triggers a Volatility 3 analysis on an existing acquisition. Body: `{"acquisition_id": "<uuid>", "preset": "fast"\|"full"\|"custom", "plugins": [...]}`. Returns `202 Accepted` with a `job_id`. |
-| `POST` | `/api/v1/misp-enrichments` | token | Triggers a MISP enrichment on an existing Volatility analysis. Body: `{"input_analysis_id": "analysis-volatility-...json"}`. Returns `202 Accepted` with a `job_id`. |
-| `GET` | `/api/v1/analyses/` | token | Lists all analyses (Vol3 + MISP) stored in Swift. |
+| `GET` | `/version` | none | Service version metadata. |
+| `POST` | `/api/v1/analyses/<acquisition_id>` | token | Triggers an analysis (Volatility 3 by default) on an existing acquisition. Body: `{"analyzer": "volatility", "preset": "fast"\|"full"\|"custom", "plugins": [...]}`. The `acquisition_id` is in the URL path, **not** in the body. Returns `202 Accepted` with a `job_id`. |
+| `POST` | `/api/v1/misp-enrichments` | token | Triggers a MISP enrichment on an existing Volatility analysis. Body: `{"input_analysis_id": "analysis-volatility-..."}`. Returns `202 Accepted` with a `job_id`. |
+| `GET` | `/api/v1/acquisitions` | token | Lists all acquisitions visible in Swift (mirror of the acquisition backend, for analyzer-side use). |
+| `GET` | `/api/v1/acquisitions/<acquisition_id>` | token | Returns the JSON report of one acquisition (mirror of the acquisition backend). |
+| `GET` | `/api/v1/analyses/<acquisition_id>` | token | Lists all analyses (Vol3 + MISP) linked to the given acquisition. |
 | `GET` | `/api/v1/analyses/by-id/<analysis_id>` | token | Returns the full JSON for one analysis (Vol3 or MISP). |
-| `GET` | `/api/v1/analyses/by-acquisition/<acquisition_id>` | token | Lists all analyses linked to a given acquisition. |
-| `GET` | `/api/v1/jobs/` | token | Lists analyzer jobs (Vol3 + MISP), most recent first. |
+| `GET` | `/api/v1/plugins` | token | Lists the Volatility plugin whitelist available to `preset=custom`. |
+| `GET` | `/api/v1/jobs` | token | Lists analyzer jobs (Vol3 + MISP), most recent first. |
 | `GET` | `/api/v1/jobs/<job_id>` | token | Job status, designed for polling. |
+| `DELETE` | `/api/v1/jobs/<job_id>` | token | Deletes a job record (post-completion cleanup). |
+| `DELETE` | `/api/v1/cache/<acquisition_id>` | token | Clears the analyzer's local cache for the given acquisition. |
+
+> The analyzer exposes a small read-only mirror of the acquisitions endpoints (`GET /api/v1/acquisitions[/<id>]`) for analyzer-side workflows that need to cross-reference acquisitions without round-tripping through the acquisition backend. The canonical source for acquisitions remains `:5234`.
 
 ### End-to-end example: acquire, analyze, enrich, export PDF
 
@@ -391,13 +398,14 @@ while true; do
   [[ "$STATUS" == "completed" || "$STATUS" == "failed" ]] && break
   sleep 2
 done
-ACQ_ID=$(echo "$JOB" | jq -r .result.acquisition_id)
+ACQ_ID=$(echo "$JOB" | jq -r .acquisition_id)
 
 # 2) Trigger a Volatility full analysis on the acquisition
+#    NB: acquisition_id goes in the URL path; the body carries analyzer + preset.
 VOL_JOB=$(curl -sX POST \
      -H "X-Auth-Token: $TOKEN" -H "Content-Type: application/json" \
-     -d "{\"acquisition_id\": \"$ACQ_ID\", \"preset\": \"full\"}" \
-     http://$HOST:5235/api/v1/analyses \
+     -d '{"analyzer": "volatility", "preset": "full"}' \
+     http://$HOST:5235/api/v1/analyses/$ACQ_ID \
      | jq -r .job_id)
 
 # Poll until complete (analyzer backend)
@@ -407,7 +415,7 @@ while true; do
   [[ $(echo "$J" | jq -r .status) =~ ^(completed|failed)$ ]] && break
   sleep 5
 done
-VOL_ANALYSIS_ID=$(echo "$J" | jq -r .result.analysis_id)
+VOL_ANALYSIS_ID=$(echo "$J" | jq -r .analysis_id)
 
 # 3) Trigger a MISP enrichment on the Volatility analysis
 MISP_JOB=$(curl -sX POST \
@@ -445,23 +453,32 @@ Trimmed to the forensically meaningful fields; the full structure mirrors `app/r
   "schema_version": "1.2",
   "acquisition_id": "<uuid4>",
   "operator":       "dfir-tester",
-  "tool": { "name": "ForensicNova", "version": "0.1.0" },
+  "tool":           { "name": "ForensicNova", "version": "0.1.0" },
+
   "timestamps": {
     "started_at":       "2026-05-31T17:18:23.482015Z",
     "completed_at":     "2026-05-31T17:21:11.094277Z",
     "duration_seconds": 167.61
   },
-  "target_system": {
-    "nova":     { "id": "...", "name": "win2022-dfir-target", "status": "ACTIVE", "host": "devstack", ... },
-    "flavor":   { "id": "...", "name": "ds4G", "vcpus": 2, "ram_mb": 4096, "disk_gb": 25 },
-    "glance":   { "id": "...", "name": "win2022-dfir-test", "os_distro": "windows", ... },
-    "libvirt":  { "domain_name": "instance-00000007", "architecture": "x86_64", "memory_mb": 4096, ... }
+
+  "instance": {
+    "id":     "<nova-uuid>",
+    "name":   "win2022-dfir-target",
+    "domain": "instance-00000007"
   },
+
+  "target_system": {
+    "nova":     { "id": "...", "name": "win2022-dfir-target", "status": "ACTIVE", "host": "devstack", "...": "..." },
+    "flavor":   { "id": "...", "name": "ds4G", "vcpus": 2, "ram_mb": 4096, "disk_gb": 25 },
+    "glance":   { "id": "...", "name": "win2022-dfir-test", "os_distro": "windows", "...": "..." },
+    "libvirt":  { "domain_name": "instance-00000007", "architecture": "x86_64", "memory_mb": 4096, "...": "..." }
+  },
+
   "dump": {
     "size_bytes":         4297064448,
     "md5":                "<hex>",
     "sha1":               "<hex>",
-    "format":             "elf64",
+    "format":             "raw",
     "acquisition_method": "libvirt-coreDumpWithFormat",
     "swift_object":       "forensics/dump-win2022-dfir-target-20260531T171823Z.raw",
     "swift_etag":         "<composite-hex>-2",
@@ -472,9 +489,24 @@ Trimmed to the forensically meaningful fields; the full structure mirrors `app/r
       { "index": 2, "name": "...seg-0002", "size":    2097152, "md5": "<hex>", "etag": "<hex>" }
     ]
   },
+
+  "report": {
+    "swift_object": "forensics/report-win2022-dfir-target-20260531T171823Z.json",
+    "filename":     "report-win2022-dfir-target-20260531T171823Z.json"
+  },
+
   "chain_of_custody": {
     "total_events": 14,
-    "events": [ /* numbered, timestamped event timeline */ ]
+    "events": [
+      {
+        "seq":         1,
+        "event_type":  "async_job_started",
+        "description": "Async pipeline worker started — job picked up from REST endpoint",
+        "timestamp":   "2026-05-31T17:18:23.482015Z",
+        "data":        { /* event-specific payload */ }
+      }
+      // ... 13 more events
+    ]
   }
 }
 ```
@@ -489,103 +521,142 @@ Trimmed to the forensically meaningful fields; the full structure mirrors `app/r
   "analyzer":         "volatility",
   "analyzer_version": "0.4.0",
   "preset":           "fast",            // fast | full | custom
+  "plugins":          null,              // null for fast/full; list of FQNs for custom
   "operator":         "dfir-tester",
-  "input_dump": {
-    "swift_object": "forensics/dump-...raw",
-    "size_bytes":   4297064448
-  },
+
   "timestamps": {
     "started_at":   "2026-05-31T17:21:41.000Z",
     "completed_at": "2026-05-31T17:23:55.000Z"
   },
-  "coherence_check": {
-    "hashes_match_report": true,        // triple-witness PASS
-    "analyzer_read_md5":   "<hex>",
-    "analyzer_read_sha1":  "<hex>"
+
+  "input_dump": {
+    "swift_object":  "forensics/dump-...raw",
+    "size_bytes":    4297064448,
+    "expected_md5":  "<hex>",            // from acquisition report — witness 1
+    "expected_sha1": "<hex>"
   },
-  "plugins": null,                       // NULL at top level — actual results live under result.plugins
-  "result": {
-    "vol3_version": "2.28.0",
-    "os_hint":      "windows",
-    "summary_counts": { "ok": 11, "failed": 0, "timeout": 0, "parse_error": 0 },
+
+  "coherence_check": {
+    "expected_md5":        "<hex>",      // witness 1 (acquisition backend)
+    "expected_sha1":       "<hex>",
+    "analyzer_read_md5":   "<hex>",      // witness 3 (analyzer re-hash) — must match witness 1
+    "analyzer_read_sha1":  "<hex>",
+    "analyzer_size_bytes": 4297064448,
+    "hashes_match_report": true          // triple-witness PASS
+  },
+
+  "result": {                            // opaque, analyzer-specific
+    "vol3_version":   "2.28.0",
+    "os_hint":        "windows",
+    "duration_seconds":     134.2,
+    "throughput_mib_per_s": 30.5,
+    "summary_counts": { "ok": 11, "failed": 0, "timeout": 0, "parse_error": 0, "skipped_hash_fail": 0 },
     "plugins": {
-      "windows.pslist.PsList":   { "status": "ok", "row_count": 102, "duration_seconds": 8.2, "rows": [...] },
-      "windows.netscan.NetScan": { "status": "ok", "row_count":  94, "duration_seconds": 7.8, "rows": [...] },
-      "windows.malfind.Malfind": { "status": "ok", "row_count":  14, "duration_seconds": 12.4, "rows": [...] }
-      // ... all executed plugins
+      "windows.pslist.PsList":   { "status": "ok", "row_count": 102, "duration_seconds":  8.2, "rows": [/* ... */] },
+      "windows.netscan.NetScan": { "status": "ok", "row_count":  94, "duration_seconds":  7.8, "rows": [/* ... */] },
+      "windows.malfind.Malfind": { "status": "ok", "row_count":  14, "duration_seconds": 12.4, "rows": [/* ... */] }
+      // ... one entry per executed plugin
     }
   }
 }
 ```
+> The JSON has two unrelated keys named plugins. Top-level plugins is the input parameter of the analysis (which plugins the operator requested, or null for preset-based runs); result.plugins is the output dictionary (the actual rows produced by each executed plugin). They are not redundant — they represent input vs output of the same analysis.
 
 ### MISP analysis — `analysis-misp-<acq>-<UTC>-<job8>.json` (1.0)
 
 ```jsonc
 {
   "schema_version":     "1.0",
-  "analysis_id":        "analysis-misp-...",     // no .json suffix
-  "acquisition_id":     "<uuid4>",                // STABLE link to acquisition
+  "analysis_id":        "analysis-misp-...",        // no .json suffix (unlike Volatility)
+  "acquisition_id":     "<uuid4>",                  // STABLE link to acquisition
+  "operator":           "dfir-tester",
   "analyzer":           "misp",
   "analyzer_version":   "0.1.0",
+
   "started_at":         "2026-06-03T22:36:38.306175Z",   // top-level (NOT under timestamps)
   "completed_at":       "2026-06-03T22:36:50.200475Z",
   "duration_seconds":   11.89,
+
   "source": {
-    "analysis_id":         "analysis-volatility-fast-...json",
-    "hashes_match_report": true                   // re-verified coherence
+    "input_analysis_id":   "analysis-volatility-fast-...json",  // the Vol3 JSON consumed
+    "input_hashes":        { "md5": "<hex>", "sha1": "<hex>" }, // dump hashes from source
+    "hashes_match_report": true,                                // re-verified coherence
+    "os_hint":             "windows"
   },
+
   "misp_server": {
-    "url": "https://127.0.0.1:10443",
+    "url":                   "https://127.0.0.1:10443",
     "events_count_at_query": 1613,
-    "feeds": [                                    // captured at query time, drives Intelligence source
+    "feeds": [                                       // captured at query time, drives Intelligence source
       { "name": "CIRCL OSINT Feed", "provider": "CIRCL", "url": "https://...",
         "enabled": true, "caching_enabled": true }
     ]
   },
-  "iocs_extracted": 107,
+
+  "iocs_extracted": {                                // grouped breakdown of every extracted IOC
+    "ip_addresses":   [ { "value": "203.0.113.42", "source_plugin": "windows.netscan.NetScan", "context": "..." } ],
+    "domains":        [ /* domains + urls go here */ ],
+    "file_hashes":    { "md5": [], "sha1": [], "sha256": [] },
+    "process_names":  [ { "value": "mimikatz.exe", "source_plugin": "windows.pslist.PsList", "context": "PID 3536, PPID 1660" } ],
+    "registry_paths": [],
+    "filtered_out":   {
+      "private_ips":      54,
+      "ms_update_ips":    12,
+      "localhost_ips":     2,
+      "native_processes": 31,
+      "total_filtered":   99,
+      "reason":           "RFC1918 / MS-CDN / Windows-native / system DLLs"
+    }
+  },
+
   "enrichment": [
     {
-      "ioc_type":    "filename",
-      "ioc_value":   "mimikatz.exe",
-      "context":     "PID 3536, PPID 1660",        // where the IOC came from inside the dump
-      "misp_match":  2,
+      "ioc_type":   "filename",
+      "ioc_value":  "mimikatz.exe",
+      "context":    "PID 3536, PPID 1660",            // where the IOC came from inside the dump
+      "misp_match": 2,                                 // number of matched MISP events
       "events": [
         {
-          "event_id": 17,
-          "info":     "Nvidia leak - abused certificate for signing malicious code and tools such as mimikatz",
-          "org":      "CIRCL",                      // proxy for the feed source (see Known limitations)
-          "galaxies": [{ "value": "Tool:Mimikatz" }],
+          "event_id":    17,
+          "info":        "Nvidia leak - abused certificate for signing malicious code and tools such as mimikatz",
+          "org":         "CIRCL",                      // proxy for the feed source (see Known limitations)
+          "galaxies":    [ { "value": "Tool:Mimikatz" } ],
           "attribution": { "actor": null, "actor_hint": null },
-          "tags":     ["tlp:white", "misp-galaxy:tool=\"Mimikatz\"", "..."]
+          "tags":        [ "tlp:white", "misp-galaxy:tool=\"Mimikatz\"", "..." ]
         }
         // ...
       ]
     }
     // ... one entry per IOC, including those with zero matches
   ],
-  "injection_signals": {                            // populated by analyzer from Vol3 malware plugins
-    "malfind_regions":      14,                     // informational, not scored
-    "psxview_only_psscan":   8,                     // informational
-    "suspicious_threads":    2,                     // SCORING: drives threat-score rule R2
+
+  "injection_signals": {                              // populated by analyzer from Vol3 malware plugins
+    "malfind_regions":      14,                       // informational, not scored
+    "psxview_only_psscan":   8,                       // informational
+    "suspicious_threads":    2,                       // SCORING: drives threat-score rule R2
     "hollow_processes":      0,
     "process_ghosting":      0,
     "service_diff":          0
   },
+
   "summary": {
-    "threat_score":          "red",                 // green | yellow | red
+    "threat_score":          "red",                   // green | yellow | red
     "threat_score_reason":   "high-risk galaxy match: Tool:Meterpreter - S0500",
-    "iocs_checked":          8,
-    "iocs_filtered":         99,                    // RFC1918 / MS-CDN / native processes / system DLLs
-    "iocs_with_match":       5,
+    "total_iocs_extracted":  107,                     // total raw IOCs extracted before filtering
+    "total_iocs_filtered":   99,                      // RFC1918 / MS-CDN / native processes / system DLLs
+    "total_iocs_checked":    8,                       // 107 - 99, the ones actually queried to MISP
+    "iocs_with_misp_match":  5,
     "iocs_without_match":    3,
-    "unique_actors":         ["UNC-FNDEMO"],
-    "unique_galaxies":       ["Tool:Mimikatz", "Tool:Meterpreter - S0500"],
-    "unique_attck":          ["T1003", "T1055", "T1071", "T1105", "T1553.002"]
+    "unique_actors":         [ "UNC-FNDEMO" ],
+    "unique_galaxies":       [ "Tool:Mimikatz", "Tool:Meterpreter - S0500" ],
+    "unique_attck":          [ "T1003", "T1055", "T1071", "T1105", "T1553.002" ]
   }
 }
 ```
 
-The triple-witness coherence check (`coherence_check.hashes_match_report` on the Volatility analysis, `source.hashes_match_report` on the MISP analysis) is computed independently in each backend by re-reading the dump from Swift and re-hashing it — it is the third witness of integrity after the acquisition backend (witness 1) and the Swift server (witness 2). Any tampering with the dump in storage trips this check before any analysis runs.
+The triple-witness coherence check is computed by the **Volatility analyzer** (`coherence_check.hashes_match_report` in each Volatility analysis JSON), which independently re-reads the dump from Swift and re-hashes it before running any plugin. This is the **third witness** of integrity, after the acquisition backend (witness 1, hashing at the hypervisor) and the Swift server (witness 2, end-to-end ETag verification). Any tampering with the dump in storage trips this check before any analysis runs.
+
+The **MISP enrichment** analysis does not re-hash the dump — its input is the Volatility JSON, not the raw binary. Instead it propagates the source analyzer's verdict in `source.hashes_match_report`, and **refuses to proceed** (fail-fast with `ValueError`) if that flag is `false`. The MISP analysis is therefore bound to a verified-dump source **by inheritance**: the witness chain stays at three independent measurements, while every downstream analysis is gated on the Volatility witness.
 
 ---
 
@@ -603,9 +674,9 @@ The title on the cover and in every page header is *Volatile memory forensic rep
 
 - **Chain of custody** — numbered timeline table (`seq`, timestamp, event type, description). Failure events (`*_failed`, `integrity_failure`) are rendered in red. The per-event JSON payloads are intentionally **not** dumped (they duplicate information already shown in Evidence and hashes); the full record lives in the downloadable JSON.
 
-- **Analysis** — dispatcher section that iterates over every analysis associated with the acquisition. Volatility 3 sections (one per analysis) are rendered **light**: a meta table (preset, Vol3 version, OS hint, duration, coherence check + analyzer-read MD5/SHA-1), a summary counts line (`Plugins executed: N ok, M failed, ...`), and a per-plugin table (name, status, row count, duration, error). Per-plugin rows are not dumped in the PDF — they live in the downloadable JSON, since dumping hundreds of plugin rows would bury the analyst-meaningful summary. MISP enrichment sections (one per analysis) are rendered **rich**: the *Intelligence source* line (feeds enabled at query time, e.g. *CIRCL OSINT Feed (CIRCL)*), the *MISP events at query* count, the threat-score box (green / yellow / red, with the firing rule in plain English), the injection-signals breakdown (scoring vs informational), an aggregate summary (Tools, ATT&CK techniques by code + name, Threat actors), and the **IOC enrichment table** — one row per IOC with type, value, match count, attribution (actor · galaxy · ATT&CK · `src: <feed-provider>`), and context (where the IOC came from inside the dump). The attribution `src:` line for each IOC is the per-IOC source mapped from the matched event's creator organisation; the section-level *Intelligence source* is the section-wide feeds list.
+- **Analysis** — dispatcher section that iterates over every analysis associated with the acquisition. Volatility 3 sections (one per analysis) are rendered **light**: a meta table (preset, Vol3 version, OS hint, duration, coherence check + analyzer-read MD5/SHA-1), a summary counts line (`Plugins executed: N ok, M failed, ...`), and a per-plugin table (name, status, row count, duration, error). Per-plugin rows are not dumped in the PDF — they live in the downloadable JSON, since dumping hundreds of plugin rows would bury the analyst-meaningful summary. MISP enrichment sections (one per analysis) are rendered **rich**: a key-value table covering *Intelligence source* (feeds enabled at query time, e.g. *CIRCL OSINT Feed (CIRCL)*), *MISP events at query* count, *Coherence* (the inherited Volatility witness flag), *IOCs extracted* / *checked* / *with match* / *filtered* (the four-way breakdown of how raw IOCs flowed through the anti-noise filter and the MISP lookup), the threat-score box (green / yellow / red, with the firing rule in plain English), the injection-signals breakdown (scoring vs informational), an aggregate summary (Tools, ATT&CK techniques by code + name, Threat actors), and the **IOC enrichment table** — one row per IOC with type, value, match count, attribution (actor · galaxy · ATT&CK · `Source: <feed-provider>`), and context (where the IOC came from inside the dump). The attribution `Source:` line for each IOC is the per-IOC provenance mapped from the matched event's creator organisation; the section-level *Intelligence source* is the section-wide feeds list.
 
-- **Notice** — five paragraphs of legal disclaimer covering: (1) the role of the PDF relative to the canonical JSON + RAW evidence; (2) the cryptographic integrity guarantees (streaming MD5+SHA-1 at hypervisor, end-to-end ETag, triple-witness in each analysis, the chain-of-custody journal); (3) the threat-intelligence caveat — every match is only as authoritative as the feed that supplied it, and the *Intelligence source* field records that provenance; (4) the "distinct print event" property — every regeneration is byte-different with its own `CreationDate`, while the underlying evidence is fixed; (5) the academic-prototype status of the project.
+- **Notice** — five paragraphs of legal disclaimer covering: (1) the role of the PDF relative to the canonical JSON + RAW evidence; (2) the cryptographic integrity guarantees (streaming MD5+SHA-1 at hypervisor, end-to-end ETag, triple-witness in each analysis) and the append-only chain-of-custody journal; (3) the threat-intelligence caveat — every match is only as authoritative as the feed that supplied it, and the *Intelligence source* field records that provenance; (4) the "distinct print event" property — every regeneration is byte-different with its own `CreationDate`, while the underlying evidence is fixed; (5) the academic-prototype status of the project.
 
 **Headers and footers on every page** are rendered through a two-pass `NumberedCanvas` so the footer can show `page X of Y`: top band has the title (*ForensicNova — volatile memory forensic report*) on the left and operator identity on the right; bottom band has the full acquisition UUID on the left and `page X of Y` on the right.
 
@@ -621,7 +692,7 @@ This section is the empirical answer to "does the detector see what it is suppos
 
 ### Stage 1 — GREEN baseline (clean Windows guest)
 
-A freshly-OOBE'd Windows Server 2022 guest with no user-mode activity beyond the standard desktop session (Edge, Notepad). The acquisition pipeline produces a 4 GiB dump in ~5 seconds; the `fast` preset of Volatility 3 produces ~100 IOC candidates. After the anti-noise filter (RFC 1918, Microsoft CDN ranges, known Windows-native processes, system DLL paths), 2 IOCs survive (`notepad.exe`, `msedge.exe`, both anagrafici); both are queried against MISP and return zero matches; threat score is **GREEN**. This is the negative control — no false positives on a clean image.
+A freshly-OOBE'd Windows Server 2022 guest with no user-mode activity beyond the standard desktop session (Edge, Notepad). The acquisition pipeline produces a 4 GiB dump in **~80 seconds** end-to-end (libvirt coreDump + MD5+SHA-1 streaming + SLO upload to Swift + secure delete); the `fast` preset of Volatility 3 produces ~100 IOC candidates. After the anti-noise filter (RFC 1918, Microsoft CDN ranges, known Windows-native processes, system DLL paths), 2 IOCs survive (`notepad.exe`, `msedge.exe`, both metadata-only entries); both are queried against MISP and return zero matches; threat score is **GREEN**. This is the negative control — no false positives on a clean image.
 
 ### Stage 2 — YELLOW with a vanilla MISP feed (CIRCL only)
 
@@ -645,11 +716,11 @@ To illustrate how the detector behaves against a more capable feed — one that 
 
 ![RED with attribution — sensitivity demo](docs/screenshots/horizon-07-analysis-misp-red.png)
 
-This is a *sensitivity* result: same dump, same Volatility output, same detection rules — only the intelligence quality changes. The detector visibly scales with feed quality, while remaining honest about which datapoints came from a curated demo set and which came from a public feed (the per-IOC *Source* column distinguishes *CIRCL* from *ForensicNova*).
+This is a *sensitivity* result: same dump, same Volatility output, same detection rules — only the intelligence quality changes. The detector visibly scales with feed quality, while remaining honest about which datapoints came from a curated demo set and which came from a public feed (the per-IOC *Source* column distinguishes *CIRCL* (public feed) from *ForensicNova* (the lab's curated demo events)).
 
 ### Preset comparison
 
-The same dump can be analysed with either the `fast` preset (~11 plugins, ~30 seconds, behavioural signals only via informational counters) or the `full` preset (~34 plugins, ~10 minutes, with the precise injection detectors). The fast preset is appropriate for triage and routine sweeps; the full preset is the deeper dive that lets behavioural rules (R2) trip on their own.
+The same dump can be analysed with either the `fast` preset (~11 plugins, ~3 minutes on a 4 GiB dump, behavioural signals only via informational counters) or the `full` preset (~34 plugins, ~13 minutes on the same dump, with the precise injection detectors). The fast preset is appropriate for triage and routine sweeps; the full preset is the deeper dive that lets behavioural rules (R2) trip on their own.
 
 ![Volatility fast preset detail](docs/screenshots/horizon-10-analysis-volatility-fast.png)
 
@@ -673,11 +744,11 @@ To query Nova and Glance metadata for VMs owned by any tenant, `dfir-tester` is 
 
 ### Windows-only analysis
 
-The analyzer's Volatility presets target Windows guests (the demo platform is Windows Server 2022), and the MISP enrichment explicitly refuses non-Windows dumps (`os_hint != "windows"` → fail-fast). Linux dumps are out of scope for this thesis. The acquisition pipeline itself is OS-agnostic — only the analysis side is Windows-only.
+The analyzer's Volatility presets target Windows guests (the demo platform is Windows Server 2022). Both the Volatility analyzer (`os_hint == "linux"` → `LinuxNotSupportedError`) and the MISP enrichment (`os_hint != "windows"` → `ValueError`) fail-fast on non-Windows dumps, so the pipeline never produces a misleading result on an unsupported OS. **Analysis of Linux dumps** is out of scope in this release; **Linux analysis support** is listed in the [Roadmap](#roadmap). The acquisition pipeline itself is fully OS-agnostic — a Linux guest's RAM can be acquired, hashed, uploaded, and reported just like a Windows one (the project has been smoke-tested on CirrOS for exactly this reason); only the post-acquisition analysis side is Windows-only.
 
-### MISP feed attribution via event creator
+### Per-IOC Source: organisation-of-record attribution
 
-The per-IOC *Source* column and the section-level *Intelligence source* shown in the dashboard and PDF use the matched event's creator organisation (`Orgc`) as a proxy for the feed the event came from. For events imported from a feed this coincides with the feed provider (e.g. *CIRCL*); a manually created event by an organisation that also publishes a feed would still be attributed to the organisation. The strict event-to-feed mapping is available via MISP's feed-correlation API and is left as future work.
+The per-IOC *Source* column and the section-level *Intelligence source* expose the matched event's creator organisation (`Orgc`) as the IOC provenance — the field that an analyst uses to weight the credibility of a finding. For events imported from a feed this coincides with the feed provider (e.g. *CIRCL*), which is the canonical case in the demo deployment. A stricter event-to-feed mapping, distinguishing the matched feed object from the event creator in corner cases (e.g. an organisation that both publishes a feed and also creates manual events), is available via MISP's feed-correlation API and is listed in the [Roadmap](#roadmap) as a future extension.
 
 ### Large acquisitions and the Swift loopback
 
@@ -691,14 +762,15 @@ After a reboot of the hypervisor, Nova reports guests as `SHUTOFF` by default (`
 
 ## Roadmap
 
-Possible directions for future development, building on the current code without breaking changes:
+Natural extensions of the current work, identified as future research directions in the M.Sc. thesis discussion. Each builds on the existing code without breaking changes:
 
 - **YARA-based triage of memory dumps** — signature scanning of in-memory regions against known malware families and custom threat-actor rules, feeding the existing `analysis` section of the report alongside Volatility and MISP findings.
 - **Hash-based MISP correlation for in-memory binaries** — extend the IOC extractor with imphash (and other relocation-immune signatures) of PE images recovered from memory, to complement the current behavioural matching.
-- **Linux dump support** — extend the Volatility preset catalogue and lift the `os_hint == "windows"` guard on the MISP enricher.
+- **Linux dump analysis support** — extend the Volatility preset catalogue and lift the `os_hint == "windows"` guard on the MISP enricher.
 - **Strict feed-to-event mapping** — replace the `Orgc`-as-proxy attribution with MISP's feed-correlation API, so the per-IOC *Source* column distinguishes the matched feed object from the event creator.
-- **Cumulative case-level PDF** — bundle multiple acquisitions in a single signed forensic report with a deterministic cover sheet for legal hand-off, reusing the `render_*` building blocks of the per-acquisition PDF.
-- **Production-grade hardening** — replace the Werkzeug development server with `gunicorn` / `uWSGI`, and tighten the cross-tenant grant via a `policy.yaml` override on Nova releases where policy overrides remain compatible.
+- **Cumulative case-level PDF** — bundle multiple acquisitions in a single operator-signable forensic report with a deterministic cover sheet for legal hand-off, reusing the `render_*` building blocks of the per-acquisition PDF.
+- **Production WSGI runner** — replace the Flask development server (Werkzeug) with `gunicorn` / `uWSGI` behind a reverse proxy, with proper worker pool, graceful restart, and system-level logging integration.
+- **Fine-grained cross-tenant scoping** — tighten the `dfir-tester` admin grant to a service-specific read scope on Nova/Glance via a `policy.yaml` override, on Nova releases where policy overrides remain compatible with the default-policy regime.
 
 ---
 
