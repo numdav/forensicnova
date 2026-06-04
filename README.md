@@ -52,91 +52,98 @@ The deployment is a monorepo that wires **three DevStack services** plus an **ex
 
 ```mermaid
 flowchart TD
-    %% Stili generali
+    %% Style Definitions
     classDef actor fill:#eceff1,stroke:#37474f,stroke-width:2px;
     classDef api fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;
     classDef pipe fill:#e3f2fd,stroke:#1565c0,stroke-width:1px;
     classDef storage fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
     classDef external fill:#fce4ec,stroke:#c2185b,stroke-width:1px;
 
-    %% Livello Utente / Operatore
-    subgraph OPERATOR_LAYER ["OPERATORE / DFIR ANALYST"]
-        Op[Browser / curl / scripts]
+    %% Operator Layer
+    subgraph OPERATOR_LAYER ["OPERATOR / DFIR ANALYST"]
+        Op["browser / curl / scripts"]
     end
     class Op actor;
 
-    %% Livello Dashboard
-    subgraph DASHBOARDS ["DASHBOARDS"]
-        DB["<b>Horizon</b> (DFIR panel group - Official UI)<br>&<br><b>Flask</b> (:5234 - Backup, acq.)"]
+    %% Dashboards Layer
+    subgraph DASHBOARDS_LAYER ["DASHBOARDS"]
+        DB["Horizon - DFIR panel group (official UI)<br>&<br>Flask - :5234 (backup, acq.)"]
     end
 
     Op -->|HTTP / Keystone X-Auth-Token| DB
 
-    %% Livello API e Autenticazione
+    %% API & Auth Layer
     subgraph API_LAYER ["API LAYER"]
-        AcqAPI["Acquisition API<br><code>:5234/api/v1</code>"]
-        AnAPI["Analyzer API<br><code>:5235/api/v1</code>"]
+        AcqAPI["Acquisition API<br>:5234/api/v1"]
+        AnAPI["Analyzer API<br>:5235/api/v1"]
     end
     class AcqAPI,AnAPI api;
 
     DB --> AcqAPI
     DB --> AnAPI
 
-    Keystone["<b>Keystone Auth</b><br>• role: forensic_analyst<br>• dfir/dfir-analyzer"]
+    Keystone["Keystone<br>• role: forensic_analyst<br>• dfir/dfir-analyzer"]
     class Keystone external;
     AnAPI <-->|authN / authZ| Keystone
+    AcqAPI <-->|authN / authZ| Keystone
 
-    %% Pipeline di Acquisizione e Analisi
+    %% Pipelines Layer
     subgraph PIPELINES ["PIPELINES"]
         subgraph ACQ_PIPE ["ACQUISITION PIPELINE"]
-            direction TB
-            P1["1. libvirt coreDump<br>(raw, no guest writes)"] --> 
-            P2["2. MD5 + SHA-1<br>(streaming 64 KB)"] --> 
-            P3["3. Nova/Glance/libvirt metadata"] --> 
-            P4["4. Swift upload + ETag/SLO verify"] --> 
-            P5["5. secure delete shred<br>(only if verified)"]
+            P1["1 libvirt coreDump<br>(raw, no guest writes)"]
+            P2["2 MD5 + SHA-1<br>(streaming 64 KB)"]
+            P3["3 Nova/Glance/libvirt metadata"]
+            P4["4 Swift upload<br>+ ETag/SLO verify"]
+            P5["5 secure delete shred<br>(only if verified)"]
+            
+            P1 --> P2
+            P2 --> P3
+            P3 --> P4
+            P4 --> P5
         end
         
         subgraph AN_PIPE ["ANALYSIS PIPELINE"]
-            direction TB
-            A1["Triple-witness hash<br>coherence check"] --> 
-            A2["Volatility 3<br>(fast/full/custom)"] --> 
+            A1["triple-witness hash<br>coherence check"]
+            A2["Volatility 3<br>(fast/full/custom)"]
             A3["MISP IOC enrichment<br>(extract/correlate / threat score)"]
+            
+            A1 --> A2
+            A2 --> A3
         end
     end
     class P1,P2,P3,P4,P5,A1,A2,A3 pipe;
 
-    AcqAPI -->|Avvia| P1
-    AnAPI -->|Avvia| A1
+    AcqAPI --> P1
+    AnAPI --> A1
 
-    MISP["<b>MISP Server</b><br>(external, CIRCL OSINT feed)"]
+    MISP["MISP server<br>(external, CIRCL OSINT feed)"]
     class MISP external;
     A3 <-->|IOC lookup| MISP
 
-    %% Livello Storage (Evidence Locker)
+    %% Storage Layer (Evidence Locker)
     subgraph SWIFT_LAYER ["SWIFT - EVIDENCE LOCKER"]
-        Swift["<b>Containers:</b> forensics + forensics_segments<br><hr>• RAM dump (.raw)<br>• acquisition report JSON v1.2<br>• Volatility JSON<br>• MISP JSON (+ threat score)"]
+        Swift["Containers: forensics + forensics_segments<br>===<br>• RAM dump (.raw)<br>• acquisition report JSON v1.2<br>• Volatility JSON<br>• MISP JSON (+ threat score)"]
     end
     class Swift storage;
 
     P5 -->|dump + report v1.2| Swift
     A3 -->|Volatility + MISP JSON| Swift
     
-    %% Nota di lettura (Footnote 1)
-    Swift -.->|Llegge il dump verificato<br>prima di ogni analisi| A1
+    %% Footnote 1
+    Swift -.->|Reads verified dump back<br>before each analysis| A1
 
-    %% Output Finale
-    PDF["<b>PDF FORENSIC REPORT</b><br>(operator-signable, on-demand)"]
+    %% Final Output
+    PDF["PDF FORENSIC REPORT<br>(operator-signable, on-demand)"]
     Swift -->|report + analyses| PDF
 
-    %% Rappresentazione Chain of Custody
-    CoC(("[Log] Chain of Custody:<br>Append-only JSONL ad ogni step"))
+    %% Chain of Custody Log
+    CoC["[Log] Chain of custody:<br>Append-only JSONL log"]
     P1 -.-> CoC
     P2 -.-> CoC
     P3 -.-> CoC
     P4 -.-> CoC
     P5 -.-> CoC
-    CoC -.->|Incluso nel| Swift
+    CoC -.->|Embedded in<br>acquisition report| Swift
 ```
 
 **Crash isolation between backends.** The acquisition backend (`:5234`) and the analyzer backend (`:5235`) are deployed as separate Flask processes with separate virtualenvs (`.venv` and `.venv-analyzer`). A Volatility 3 crash on a malformed dump cannot interrupt an in-flight acquisition; an analyzer restart does not affect the acquisition pipeline; the two have independent systemd lifecycles and independent Keystone catalog entries. The Horizon dashboard plugin discovers both via Keystone catalog lookup and never hardcodes `host:port`.
