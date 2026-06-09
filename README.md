@@ -31,13 +31,56 @@ ForensicNova is the M.Sc. thesis project for the Sicurezza Informatica e Tecnolo
 
 ForensicNova is designed so that the memory image and its derived analyses are defensible in a judicial context. The acquisition pipeline behaves as a **natural write-blocker**: the guest filesystem is never touched, paged, or signaled, because libvirt reads RAM out-of-band on the hypervisor side (`coreDumpWithFormat()`); the operation is invisible to the guest OS by construction. The terminology and structure of the workflow follow **NIST SP 800-86** (*Guide to Integrating Forensic Techniques into Incident Response*, 2006), which articulates the four canonical phases — collection, examination, analysis, reporting — and recommends end-to-end cryptographic hashing without prescribing a specific algorithm.
 
+ForensicNova's evidence-handling pipeline is additionally aligned with
+**ISO/IEC 27037:2012** (adopted in Italy as **UNI CEI EN ISO/IEC 27037:2017**),
+the reference standard for the identification, collection, acquisition, and
+preservation of digital evidence. ForensicNova operates entirely as a
+**digital chain of custody**: no physical device is ever seized, so the evidence
+exists only as the acquired image and its derived analyses — exactly the case the
+standard contemplates when collection of the original device is not possible. The
+acquisition workflow maps onto the standard's process model — identification
+(operator-driven selection of the target Nova instance), acquisition (out-of-band
+libvirt `coreDumpWithFormat()`, a *bitstream copy* produced without ever accessing
+the guest filesystem), and preservation (Swift storage with end-to-end ETag
+verification, secure deletion of the staging copy, and an append-only chain of
+custody) — and satisfies the standard's four handling principles:
+
+- **Auditability** — every pipeline action is recorded in the append-only
+  chain-of-custody journal with the Keystone operator identity and a microsecond
+  UTC timestamp, so an independent assessor (a court-appointed expert or an
+  opposing technical consultant) can reconstruct and evaluate the full sequence of
+  actions.
+- **Repeatability / Reproducibility** — ISO/IEC 27037 explicitly recognises that
+  some evidence, *volatile memory included*, cannot be re-acquired, and that the
+  responder must instead make the acquisition reliable and fully documented.
+  ForensicNova does exactly this: it hashes on the hypervisor before any transfer,
+  verifies end-to-end against Swift, and re-verifies at analysis time
+  (triple-witness). The downstream *analysis* of the preserved image is itself
+  repeatable and reproducible — given the stored dump, the recorded Volatility 3
+  version, and the documented preset, a third party reaches the same result, while
+  the triple-witness check guarantees the analysed bytes are identical to the
+  acquired bytes.
+- **Justifiability** — every methodological choice is documented and defensible:
+  out-of-band acquisition as a natural write-blocker, two independent hash
+  algorithms (MD5 + SHA-1) for redundancy as recommended by digital-forensics best
+  practice, an empirically-tuned anti-noise filter, and a deterministic,
+  human-readable threat score.
+
+This places ForensicNova within the wider ISO digital-evidence framework: the
+acquisition and preservation stages follow **ISO/IEC 27037**, while the analysis
+and interpretation stage aligns with the goals of **ISO/IEC 27042** (validity,
+repeatability, and reproducibility of the analytical process). Where NIST
+SP 800-86 frames the full incident-response forensic process (collection,
+examination, analysis, reporting), the ISO 27037 / 27042 pair governs evidence
+handling and analysis specifically; ForensicNova follows both natively.
+
 Six guarantees are implemented and individually traceable in the chain-of-custody log:
 
 | # | Guarantee | Implementation |
 |---|---|---|
 | 1 | **Zero bits written inside the guest** | Acquisition via libvirt `coreDumpWithFormat()` reading `/proc/<qemu-pid>/mem` on the hypervisor. No driver, agent, or hypervisor-side write reaches the guest OS. |
 | 2 | **Hardened staging directory** | Temporary dump lands in `/var/lib/forensicnova/acquisitions/<uuid>/`, directory mode `0700`, dump file mode `0600`, owned by the service user `stack:stack`. Never in `/tmp`, never on the guest filesystem. |
-| 3 | **Hashes computed on the hypervisor, before any transfer** | MD5 + SHA-1 (two independent algorithms for redundancy) computed in streaming over 64 KB chunks directly from the staging file, in line with NIST 800-86 §4.2.2 Data File Integrity. |
+| 3 | **Hashes computed on the hypervisor, before any transfer** | MD5 + SHA-1 — two independent algorithms for redundancy, following digital-forensics best practice for collision-risk reduction — computed in streaming over 64 KB chunks directly from the staging file. Computing the digest on the hypervisor *before* any transfer satisfies the integrity requirement of the **ISO/IEC 27037** acquisition phase and aligns with the data-integrity guidance of **NIST SP 800-86**'s Collection phase. Neither standard prescribes a specific algorithm; the choice of MD5 + SHA-1 follows established forensic practice. |
 | 4 | **End-to-end ETag integrity check with Swift** | On `PUT`, Swift returns a server-side MD5. For single-object uploads the local MD5 is compared byte-for-byte; for Static Large Object uploads (≥ 4 GiB), a composite ETag is computed per segment and verified against the server response. Mismatch → pipeline aborted, the chain-of-custody flags `etag_verified: false` and the staging copy is preserved for debugging. |
 | 5 | **Secure delete of the staging copy** | Once the upload is verified, the local dump is destroyed via `shred -u -n 1`. The hypervisor never retains a recoverable residue. |
 | 6 | **Append-only chain of custody** | All pipeline events are written to `/var/log/forensicnova/chain-of-custody.jsonl` as JSON lines, with ISO-8601 UTC timestamps to microsecond precision and the Keystone operator identity attached to every event. The journal is the authoritative audit log and is also embedded in the final JSON report. |
