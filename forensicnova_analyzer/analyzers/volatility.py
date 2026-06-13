@@ -410,7 +410,7 @@ PRESET_FAST_WINDOWS = [
 # zero plugins and returning an empty result.
 PRESET_FAST_LINUX: list[str] = []
 
-# "full" preset — 17 plugins covering the six SANS macro-areas of
+# "full" preset — 34 plugins covering the six SANS macro-areas of
 # Windows memory forensics, with extra credential-theft and
 # EDR-bypass coverage enabled by the optional Vol3 deps:
 #
