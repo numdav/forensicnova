@@ -510,7 +510,7 @@ PRESET_FULL_LINUX: list[str] = []
 # preset="custom". The whitelist excludes plugins that produce
 # non-JSON-friendly output (binary file dumps, megabytes of raw
 # strings) which would inflate the analysis JSON beyond practical
-# size limits, and excludes deprecated FQN aliases.
+# size limits, and excludes deprecated FQN aliases (see below).
 #
 # Plugins added in this revision (enabled by yara-python / capstone /
 # pycryptodome optional Vol3 deps):
@@ -540,16 +540,36 @@ PRESET_FULL_LINUX: list[str] = []
 #   - windows.malware.indirect_system_calls.IndirectSystemCalls (capstone)
 #       Advanced EDR-bypass detection.
 #
-# Deprecated FQN aliases (windows.hashdump, windows.lsadump,
-# windows.cachedump, windows.direct_system_calls,
-# windows.indirect_system_calls) are intentionally NOT whitelisted:
-# they shadow the canonical namespace plugins and would lead to two
-# entries for the same logical capability in the UI selector.
-# linux.vmayarascan.VmaYaraScan is excluded because Linux is out of
-# scope.
+# Deprecated FQN aliases are intentionally NOT whitelisted: each would
+# shadow its canonical plugin and yield two entries for the same logical
+# capability in the UI selector. Volatility 3 has relocated its malware
+# plugins under windows.malware.* and the amcache / scheduled_tasks
+# plugins under windows.registry.*, deprecating the old top-level names.
+# The deprecation uses deprecation.PluginRenameClass: a deprecated alias
+# transparently forwards to and executes the canonical plugin (emitting a
+# FutureWarning) until its module is physically removed in a future Vol3
+# release. The excluded top-level aliases are:
+#   - credential / EDR-bypass (canonical elsewhere):
+#       windows.hashdump, windows.lsadump, windows.cachedump,
+#       windows.direct_system_calls, windows.indirect_system_calls
+#   - now under windows.malware.* (removal_date 2026-06-07):
+#       windows.drivermodule, windows.hollowprocesses, windows.ldrmodules,
+#       windows.malfind, windows.processghosting, windows.psxview,
+#       windows.skeleton_key_check, windows.suspicious_threads,
+#       windows.svcdiff, windows.unhooked_system_calls
+#   - now under windows.registry.* (removal_date 2026-09-25):
+#       windows.amcache, windows.scheduled_tasks
+# Only the canonical names are listed below (85 distinct plugins).
+#
+# NOTE: fast/full are independent constants, NOT derived from this set.
+# PRESET_FULL_WINDOWS still invokes windows.amcache.Amcache — the
+# pre-rename name in force when the validation experiments were run; that
+# alias and the canonical windows.registry.amcache.Amcache execute the
+# identical plugin. Leaving the full preset verbatim keeps it faithful to
+# the recorded experiment.
+# linux.vmayarascan.VmaYaraScan is excluded because Linux is out of scope.
 
 PLUGIN_WHITELIST_WINDOWS = frozenset({
-    "windows.amcache.Amcache",
     "windows.bigpools.BigPools",
     "windows.callbacks.Callbacks",
     "windows.cmdline.CmdLine",
@@ -562,7 +582,6 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.devicetree.DeviceTree",
     "windows.dlllist.DllList",
     "windows.driverirp.DriverIrp",
-    "windows.drivermodule.DriverModule",
     "windows.driverscan.DriverScan",
     "windows.envars.Envars",
     "windows.etwpatch.EtwPatch",
@@ -570,13 +589,10 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.getservicesids.GetServiceSIDs",
     "windows.getsids.GetSIDs",
     "windows.handles.Handles",
-    "windows.hollowprocesses.HollowProcesses",
     "windows.iat.IAT",
     "windows.info.Info",
     "windows.joblinks.JobLinks",
     "windows.kpcrs.KPCRs",
-    "windows.ldrmodules.LdrModules",
-    "windows.malfind.Malfind",
     "windows.malware.direct_system_calls.DirectSystemCalls",
     "windows.malware.drivermodule.DriverModule",
     "windows.malware.hollowprocesses.HollowProcesses",
@@ -604,11 +620,9 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.pe_symbols.PESymbols",
     "windows.poolscanner.PoolScanner",
     "windows.privileges.Privs",
-    "windows.processghosting.ProcessGhosting",
     "windows.pslist.PsList",
     "windows.psscan.PsScan",
     "windows.pstree.PsTree",
-    "windows.psxview.PsXView",
     "windows.registry.amcache.Amcache",
     "windows.registry.cachedump.Cachedump",
     "windows.registry.certificates.Certificates",
@@ -620,15 +634,11 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.registry.printkey.PrintKey",
     "windows.registry.scheduled_tasks.ScheduledTasks",
     "windows.registry.userassist.UserAssist",
-    "windows.scheduled_tasks.ScheduledTasks",
     "windows.sessions.Sessions",
     "windows.shimcachemem.ShimcacheMem",
-    "windows.skeleton_key_check.Skeleton_Key_Check",
     "windows.ssdt.SSDT",
     "windows.statistics.Statistics",
     "windows.suspended_threads.SuspendedThreads",
-    "windows.suspicious_threads.SuspiciousThreads",
-    "windows.svcdiff.SvcDiff",
     "windows.svclist.SvcList",
     "windows.svcscan.SvcScan",
     "windows.symlinkscan.SymlinkScan",
@@ -636,7 +646,6 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.threads.Threads",
     "windows.timers.Timers",
     "windows.truecrypt.Passphrase",
-    "windows.unhooked_system_calls.unhooked_system_calls",
     "windows.unloadedmodules.UnloadedModules",
     "windows.vadinfo.VadInfo",
     "windows.vadregexscan.VadRegExScan",
@@ -647,7 +656,6 @@ PLUGIN_WHITELIST_WINDOWS = frozenset({
     "windows.windows.Windows",
     "windows.windowstations.WindowStations",
 })
-
 # Linux is out of scope of the thesis demo (see PRESET_FAST_LINUX).
 # The architecture remains OS-agnostic via Vol3, which natively
 # supports Linux memory forensics; activating support is a matter of
