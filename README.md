@@ -349,7 +349,7 @@ The Volatility detail page shows the per-plugin summary, the triple-witness cohe
 
 ![Volatility analysis detail](docs/screenshots/horizon-06-analysis-volatility.png)
 
-The MISP enrichment detail page is where the threat-intelligence story is told. It exposes (in this order): the **Intelligence source** (the MISP feeds that were enabled at the time of the query, e.g. *CIRCL OSINT Feed (CIRCL)*); the **MISP events at query** count (how many events the MISP database held when the IOCs were checked — context for the match probability); the **threat score** with the firing rule shown in plain English (e.g. *RED — high-risk galaxy match: Tool:Meterpreter - S0500*); the **injection signals** breakdown (scoring detectors that drive the score vs informational signals shown for context only); and the **IOC enrichment** table, the analyst-facing summary of every IOC extracted from the dump:
+The MISP enrichment detail page is where the threat-intelligence story is told. It exposes (in this order): the **Intelligence source** (the MISP feeds that were enabled at the time of the query, e.g. *CIRCL OSINT Feed (CIRCL)*); the **MISP events at query** count (how many events the MISP database held when the IOCs were checked — context for the match probability); the **threat score** with the firing rule shown in plain English (e.g. *RED — high-risk galaxy match: Tool:Meterpreter*); the **injection signals** breakdown (scoring detectors that drive the score vs informational signals shown for context only); and the **IOC enrichment** table, the analyst-facing summary of every IOC extracted from the dump:
 
 ![MISP analysis — RED with attribution](docs/screenshots/horizon-07-analysis-misp-red.png)
 
@@ -684,14 +684,14 @@ Trimmed to the forensically meaningful fields; the full structure mirrors `app/r
 
   "summary": {
     "threat_score":          "red",                   // green | yellow | red
-    "threat_score_reason":   "high-risk galaxy match: Tool:Meterpreter - S0500",
+    "threat_score_reason":   "high-risk galaxy match: Tool:Meterpreter",
     "total_iocs_extracted":  107,                     // total raw IOCs extracted before filtering
     "total_iocs_filtered":   99,                      // RFC1918 / MS-CDN / native processes / system DLLs
     "total_iocs_checked":    8,                       // 107 - 99, the ones actually queried to MISP
     "iocs_with_misp_match":  5,
     "iocs_without_match":    3,
     "unique_actors":         [ "UNC-FNDEMO" ],
-    "unique_galaxies":       [ "Tool:Mimikatz", "Tool:Meterpreter - S0500" ],
+    "unique_galaxies":       [ "Tool:Mimikatz", "Tool:Meterpreter" ],
     "unique_attck":          [ "T1003", "T1055", "T1071", "T1105", "T1553.002" ]
   }
 }
@@ -755,7 +755,7 @@ This is the demonstration that the detector does **not** require a feed to surfa
 
 ### Stage 4 — RED with attribution (sensitivity demo)
 
-To illustrate how the detector behaves against a more capable feed — one that has indexed the exact tools and infrastructure of this campaign — a small set of MISP events tagged `simulated` was loaded into the lab MISP, mapped onto the exact IOCs observed in the dump (`mimikatz.exe`, `203.0.113.42`, the stage-2 URL, …) and decorated with realistic actor / galaxy / ATT&CK assignments (`UNC-FNDEMO`, `Tool:Meterpreter - S0500`, `T1003`, `T1055`, `T1071`, `T1105`, `T1553.002`). With this richer intelligence available, the enricher escalates from R2 (behavioural) to R1 (high-risk galaxy match), matches rise from 2 to 5, the attribution column is fully populated, and every event explicitly carries the `[SIMULATED] ... NOT live commercial data` marker so the demo is unambiguously distinguishable from a real intelligence find.
+To illustrate how the detector behaves against a more capable feed — one that has indexed the exact tools and infrastructure of this campaign — a small set of MISP events tagged `simulated` was loaded into the lab MISP, mapped onto the exact IOCs observed in the dump (`mimikatz.exe`, `203.0.113.42`, the stage-2 URL, …) and decorated with realistic actor / galaxy / ATT&CK assignments (`UNC-FNDEMO`, `Tool:Meterpreter`, `T1003`, `T1055`, `T1071`, `T1105`, `T1553.002`). With this richer intelligence available, the enricher escalates from R2 (behavioural) to R1 (high-risk galaxy match), matches rise from 2 to 5, the attribution column is fully populated, and every event explicitly carries the `[SIMULATED] ... NOT live commercial data` marker so the demo is unambiguously distinguishable from a real intelligence find.
 
 ![RED with attribution — sensitivity demo](docs/screenshots/horizon-07-analysis-misp-red.png)
 
