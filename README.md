@@ -747,7 +747,7 @@ This section is the empirical answer to "does the detector see what it is suppos
 
 ### Stage 1 — GREEN baseline (clean Windows guest)
 
-A freshly-OOBE'd Windows Server 2022 guest with no user-mode activity beyond the standard desktop session (Edge, Notepad). The acquisition pipeline produces a 4 GiB dump in **~80 seconds** end-to-end (libvirt coreDump + MD5+SHA-1 streaming + SLO upload to Swift + secure delete); the `fast` preset of Volatility 3 produces ~100 IOC candidates. After the anti-noise filter (RFC 1918, Microsoft CDN ranges, known Windows-native processes, system DLL paths), 2 IOCs survive (`notepad.exe`, `msedge.exe`, both metadata-only entries); both are queried against MISP and return zero matches; threat score is **GREEN**. This is the negative control — no false positives on a clean image.
+A freshly-OOBE'd Windows Server 2022 guest with no user-mode activity beyond the standard desktop session (Edge, Notepad). The acquisition pipeline produces a 4 GiB dump in **~80 seconds** end-to-end (libvirt coreDump + MD5+SHA-1 streaming + SLO upload to Swift + secure delete); the `fast` preset of Volatility 3 produces ~100 IOC candidates. After the anti-noise filter (RFC 1918, Microsoft CDN ranges, known Windows-native processes), 2 IOCs survive (`notepad.exe`, `msedge.exe`, both metadata-only entries); both are queried against MISP and return zero matches; threat score is **GREEN**. This is the negative control — no false positives on a clean image.
 
 ### Stage 2 — YELLOW with a vanilla MISP feed (CIRCL only)
 
