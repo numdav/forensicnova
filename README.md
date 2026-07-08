@@ -609,90 +609,102 @@ Trimmed to the forensically meaningful fields; the full structure mirrors `app/r
 
 ```jsonc
 {
-  "schema_version":     "1.0",
-  "analysis_id":        "analysis-misp-...",        // no .json suffix (unlike Volatility)
-  "acquisition_id":     "<uuid4>",                  // STABLE link to acquisition
-  "operator":           "dfir-tester",
-  "analyzer":           "misp",
-  "analyzer_version":   "0.1.0",
-
-  "started_at":         "2026-06-03T22:36:38.306175Z",   // top-level (NOT under timestamps)
-  "completed_at":       "2026-06-03T22:36:50.200475Z",
-  "duration_seconds":   11.89,
-
+  "schema_version":   "1.0",
+  "analysis_id":      "analysis-misp-6a8728ed-...-f3fb493f",  // no .json suffix (unlike Volatility)
+  "acquisition_id":   "6a8728ed-c689-4e69-ac3d-51319d926afe", // STABLE link to acquisition
+  "operator":         "dfir-tester",
+  "analyzer":         "misp",
+  "analyzer_version": "0.1.0",
+  "started_at":       "2026-07-08T18:42:06.634056+00:00",     // top-level (NOT under timestamps)
+  "completed_at":     "2026-07-08T18:42:15.003226+00:00",
+  "duration_seconds": 8.37,
   "source": {
-    "input_analysis_id":   "analysis-volatility-fast-...json",  // the Vol3 JSON consumed
-    "input_hashes":        { "md5": "<hex>", "sha1": "<hex>" }, // dump hashes from source
-    "hashes_match_report": true,                                // re-verified coherence
+    "input_analysis_id":   "analysis-volatility-full-6a8728ed-...json",  // the Vol3 JSON consumed (full preset)
+    "input_hashes":        null,                 // dump hashes from source (null if the source carried none)
+    "hashes_match_report": true,                 // re-verified coherence
     "os_hint":             "windows"
   },
-
   "misp_server": {
     "url":                   "https://127.0.0.1:10443",
-    "events_count_at_query": 1613,
-    "feeds": [                                       // captured at query time, drives Intelligence source
-      { "name": "CIRCL OSINT Feed", "provider": "CIRCL", "url": "https://...",
-        "enabled": true, "caching_enabled": true }
+    "events_count_at_query": 1647,
+    "feeds": [                                   // captured at query time -> drives "Intelligence source"
+      { "name": "CIRCL OSINT Feed",   "provider": "CIRCL",      "url": "https://www.circl.lu/doc/misp/feed-osint",
+        "enabled": true,  "caching_enabled": true },
+      { "name": "The Botvrij.eu Data","provider": "Botvrij.eu", "url": "https://www.botvrij.eu/data/feed-osint",
+        "enabled": false, "caching_enabled": false }  // disabled feeds are listed but NOT shown as source
     ]
   },
-
-  "iocs_extracted": {                                // grouped breakdown of every extracted IOC
-    "ip_addresses":   [ { "value": "203.0.113.42", "source_plugin": "windows.netscan.NetScan", "context": "..." } ],
-    "domains":        [ /* domains + urls go here */ ],
+  "iocs_extracted": {                            // grouped breakdown of every extracted IOC
+    "ip_addresses":   [ { "value": "203.0.113.42", "source_plugin": "windows.netscan.NetScan",
+                          "context": "ForeignAddr:4444 from PID 2288 (rundll32.exe) TCPv4 CLOSED" } ],
+    "domains":        [ { "value": "http://198.51.100.50/stage2.bin", "source_plugin": "windows.cmdline.CmdLine",
+                          "context": "cmdline of certutil.exe (PID 3340)" } ],  // urls live here too
     "file_hashes":    { "md5": [], "sha1": [], "sha256": [] },
-    "process_names":  [ { "value": "mimikatz.exe", "source_plugin": "windows.pslist.PsList", "context": "PID 3536, PPID 1660" } ],
+    "process_names":  [ { "value": "mimikatz.exe", "source_plugin": "windows.pslist.PsList",
+                          "context": "PID 3536, PPID 1660" }
+                        /* + payload.exe, rundll32.exe, certutil.exe, CompatTelRunne ... */ ],
     "registry_paths": [],
     "filtered_out":   {
-      "private_ips":      54,
-      "ms_update_ips":    12,
-      "localhost_ips":     2,
-      "native_processes": 31,
+      "private_ips":      0,
+      "ms_update_ips":    0,
+      "localhost_ips":    0,
+      "native_processes": 99,
       "total_filtered":   99,
-      "reason":           "RFC1918 / MS-CDN / Windows-native / system DLLs"
+      "reason":           "RFC1918 private ranges, loopback, Microsoft Update/CDN endpoints, Windows-native processes"
     }
   },
-
-  "enrichment": [
+  "enrichment": [                                // one entry per checked IOC (matches AND misses)
     {
-      "ioc_type":   "filename",
-      "ioc_value":  "mimikatz.exe",
-      "context":    "PID 3536, PPID 1660",            // where the IOC came from inside the dump
-      "misp_match": 2,                                 // number of matched MISP events
+      "ioc_type":   "ip-dst",
+      "ioc_value":  "203.0.113.42",
+      "context":    "ForeignAddr:4444 from PID 2288 (rundll32.exe) TCPv4 CLOSED",  // where the IOC came from in the dump
+      "misp_match": 1,
       "events": [
         {
-          "event_id":    17,
-          "info":        "Nvidia leak - abused certificate for signing malicious code and tools such as mimikatz",
-          "org":         "CIRCL",                      // proxy for the feed source (see Known limitations)
-          "galaxies":    [ { "value": "Tool:Mimikatz" } ],
-          "attribution": { "actor": null, "actor_hint": null },
-          "tags":        [ "tlp:white", "misp-galaxy:tool=\"Mimikatz\"", "..." ]
+          "event_id":    "1617",
+          "info":        "[SIMULATED premium-feed intel ...] Meterpreter C2 + staging infrastructure",
+          "org":         "ForensicNova",         // creator org (proxy for source; see Known limitations)
+          "attribution": { "actor": "UNC-FNDEMO (simulated)", "actor_hint": null },
+          "galaxies": [                          // RAW galaxy values -> note: NO "Tool:" prefix here
+            { "type": "mitre-tool",           "value": "Meterpreter",               "attck_id": null   },
+            { "type": "threat-actor",         "value": "UNC-FNDEMO (simulated)",     "attck_id": null   },
+            { "type": "mitre-attack-pattern", "value": "Process Injection - T1055", "attck_id": "T1055" }
+          ],
+          "tags": [ "tlp:amber", "forensicnova:simulated-intel=\"premium-feed-demo\"" ]
         }
-        // ...
       ]
     }
-    // ... one entry per IOC, including those with zero matches
+    // mimikatz.exe -> misp_match: 2  (CIRCL "Code Signing - T1553.002" event + seeded "Mimikatz - S0002" event)
+    // ... one entry per IOC, including the 3 with zero matches (payload.exe, rundll32.exe, CompatTelRunne)
   ],
-
-  "injection_signals": {                              // populated by analyzer from Vol3 malware plugins
-    "malfind_regions":      14,                       // informational, not scored
-    "psxview_only_psscan":   8,                       // informational
-    "suspicious_threads":    2,                       // SCORING: drives threat-score rule R2
-    "hollow_processes":      0,
-    "process_ghosting":      0,
-    "service_diff":          0
+  "injection_signals": {                         // populated by analyzer from Vol3 malware plugins
+    "malfind_regions":     5,                    // informational, not scored
+    "psxview_only_psscan": 6,                    // informational
+    "suspicious_threads":  2,                    // SCORING: drives threat-score rule R2
+    "hollow_processes":    0,
+    "process_ghosting":    0,
+    "service_diff":        0
   },
-
   "summary": {
-    "threat_score":          "red",                   // green | yellow | red
-    "threat_score_reason":   "high-risk galaxy match: Tool:Meterpreter",
-    "total_iocs_extracted":  107,                     // total raw IOCs extracted before filtering
-    "total_iocs_filtered":   99,                      // RFC1918 / MS-CDN / native processes / system DLLs
-    "total_iocs_checked":    8,                       // 107 - 99, the ones actually queried to MISP
-    "iocs_with_misp_match":  5,
-    "iocs_without_match":    3,
-    "unique_actors":         [ "UNC-FNDEMO" ],
-    "unique_galaxies":       [ "Tool:Mimikatz", "Tool:Meterpreter" ],
-    "unique_attck":          [ "T1003", "T1055", "T1071", "T1105", "T1553.002" ]
+    "threat_score":         "red",               // green | yellow | red
+    "threat_score_reason":  "high-risk galaxy match: Tool:Meterpreter",  // KIND canonicalised from galaxy type (mitre-tool -> Tool)
+    "total_iocs_extracted": 107,                 // total raw IOCs extracted before filtering
+    "total_iocs_filtered":  99,                  // RFC1918 / MS-CDN / Windows-native processes
+    "total_iocs_checked":   8,                   // 107 - 99, the ones actually queried against MISP
+    "iocs_with_misp_match": 5,
+    "iocs_without_match":   3,
+    "unique_actors":        [ "UNC-FNDEMO (simulated)" ],
+    "unique_galaxies": [                          // "<type>:<value>" form (raw type, not the canonical kind)
+      "mitre-attack-pattern:Application Layer Protocol - T1071",
+      "mitre-attack-pattern:Code Signing - T1553.002",
+      "mitre-attack-pattern:Ingress Tool Transfer - T1105",
+      "mitre-attack-pattern:OS Credential Dumping - T1003",
+      "mitre-attack-pattern:Process Injection - T1055",
+      "mitre-tool:Meterpreter",
+      "mitre-tool:Mimikatz - S0002",
+      "threat-actor:UNC-FNDEMO (simulated)"
+    ],
+    "unique_attck": [ "T1003", "T1055", "T1071", "T1105", "T1553.002" ]
   }
 }
 ```
